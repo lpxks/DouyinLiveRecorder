@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -ri \"_internal\\\\|MEIPASS\\\\|frozen\\\\|getattr.*sys.*frozen\" --include=\"*.py\" .)",
+      "Bash(grep -n \"sys._MEIPASS\\\\|sys.frozen\\\\|getattr\\(sys\" main.py src/*.py)"
+    ]
+  }
+}
