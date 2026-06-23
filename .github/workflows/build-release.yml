@@ -1,230 +1,192 @@
-name: Build Multi-Platform Release
+name: Build Release
 
 on:
   push:
     tags:
-      - 'v*'               # Trigger on version tags like v4.0.8
-  workflow_dispatch:        # Allow manual trigger from GitHub UI
-    inputs:
-      tag_name:
-        description: 'Release tag name (e.g., v4.0.8)'
-        required: false
-        default: ''
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # ==========================================================================
-  # Windows Build
-  # ==========================================================================
+  # ========================================================================
+  # Windows
+  # ========================================================================
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      # --- Bundle FFmpeg for Windows ---
-      - name: Download FFmpeg (Windows)
+      - name: Download FFmpeg
         shell: pwsh
         run: |
-          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-          Invoke-WebRequest -Uri $ffmpegUrl -OutFile ffmpeg.zip
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath .
-          $ffmpegDir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
-          Rename-Item $ffmpegDir.Name ffmpeg_bundle
+          $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          Rename-Item $dir.Name ffmpeg_bundle
           Remove-Item ffmpeg.zip
 
-      # --- Bundle Node.js for Windows ---
-      - name: Download Node.js (Windows)
+      - name: Download Node.js
         shell: pwsh
         run: |
-          $nodeUrl = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip"
-          Invoke-WebRequest -Uri $nodeUrl -OutFile node.zip
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
-          $nodeDir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
-          Rename-Item $nodeDir.Name node
+          $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          Rename-Item $dir.Name node
           Remove-Item node.zip
 
-      - name: Build with PyInstaller
+      - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
 
-      # --- Assemble portable package ---
-      - name: Assemble Windows package
+      - name: Assemble package
         shell: pwsh
         run: |
-          $distDir = "dist/DouyinLiveRecorder"
+          $dist = "dist/DouyinLiveRecorder"
 
-          # Copy FFmpeg and Node.js binaries next to the exe
-          # (the app's ffmpeg_install.py checks ./ffmpeg/bin/ and ./node/)
-          Copy-Item -Recurse ffmpeg_bundle/* $distDir/ffmpeg/ -ErrorAction SilentlyContinue
-          # FFmpeg exe is usually in ffmpeg_bundle/bin/ — flatten it
-          if (Test-Path "ffmpeg_bundle/bin/ffmpeg.exe") {
-            New-Item -ItemType Directory -Force -Path "$distDir/ffmpeg/bin" | Out-Null
-            Copy-Item ffmpeg_bundle/bin/* $distDir/ffmpeg/bin/ -Recurse
-          }
-          Copy-Item -Recurse node/* $distDir/node/ -ErrorAction SilentlyContinue
+          # ffmpeg — put at root (found via CWD) AND in ffmpeg/ (found via PATH)
+          $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
+          New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
-          # Generate default config files if missing
-          if (-not (Test-Path "$distDir/config")) {
-            New-Item -ItemType Directory -Force -Path "$distDir/config" | Out-Null
-          }
-          # Copy example config template (not user's actual config to avoid leaking secrets)
-          Copy-Item config/config.ini $distDir/config/config.ini -ErrorAction SilentlyContinue
-          # Create empty URL_config.ini
-          "" | Out-File -FilePath "$distDir/config/URL_config.ini" -Encoding utf8
+          # node — node/ dir (src/__init__.py adds ./node/ to PATH)
+          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
-          # Create logs directory
-          New-Item -ItemType Directory -Force -Path "$distDir/logs" | Out-Null
+          # Default config
+          New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
+          Copy-Item config/config.ini "$dist/config/config.ini" -ErrorAction SilentlyContinue
+          "" | Out-File -FilePath "$dist/config/URL_config.ini" -Encoding utf8
 
-          # Package as zip
-          Compress-Archive -Path $distDir/* -DestinationPath DouyinLiveRecorder_Windows_x64.zip
+          # Also copy StopRecording.vbs (upstream includes it)
+          Copy-Item StopRecording.vbs "$dist/" -ErrorAction SilentlyContinue
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          # Package
+          Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_x64.zip
+
+      - uses: actions/upload-artifact@v4
         with:
           name: DouyinLiveRecorder_Windows_x64
           path: DouyinLiveRecorder_Windows_x64.zip
 
-      - name: Upload to Release (if tag push)
+      - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: DouyinLiveRecorder_Windows_x64.zip
 
-  # ==========================================================================
-  # macOS Build
-  # ==========================================================================
+  # ========================================================================
+  # macOS
+  # ========================================================================
   build-macos:
     runs-on: macos-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies
+      - name: Install system deps
         run: |
           brew install ffmpeg node@20
-          # Link node if needed
           brew link --overwrite node@20 2>/dev/null || true
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Build with PyInstaller
+      - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
 
-      - name: Assemble macOS package
+      - name: Assemble package
         run: |
-          DISTDIR="dist/DouyinLiveRecorder"
+          DIST="dist/DouyinLiveRecorder"
 
-          # Bundle ffmpeg binary
-          mkdir -p "$DISTDIR/ffmpeg/bin"
-          cp "$(which ffmpeg)" "$DISTDIR/ffmpeg/bin/"
-          # Also copy dependent dylibs (otool-based)
-          for lib in $(otool -L "$(which ffmpeg)" | grep -o '/usr/local/.*dylib' | head -10); do
-            cp "$lib" "$DISTDIR/ffmpeg/bin/" 2>/dev/null || true
-          done
+          # ffmpeg
+          cp "$(which ffmpeg)" "$DIST/ffmpeg"
+          mkdir -p "$DIST/ffmpeg"
+          cp "$(which ffmpeg)" "$DIST/ffmpeg/ffmpeg"
 
-          # Bundle node binary
-          mkdir -p "$DISTDIR/node/bin"
-          cp "$(which node)" "$DISTDIR/node/bin/"
+          # node
+          mkdir -p "$DIST/node"
+          cp "$(which node)" "$DIST/node/node"
 
-          # Generate default config files
-          mkdir -p "$DISTDIR/config" "$DISTDIR/logs"
-          cp config/config.ini "$DISTDIR/config/config.ini" 2>/dev/null || true
-          touch "$DISTDIR/config/URL_config.ini"
+          # config
+          mkdir -p "$DIST/config" "$DIST/logs"
+          cp config/config.ini "$DIST/config/config.ini" 2>/dev/null || true
+          touch "$DIST/config/URL_config.ini"
 
-          # Package as tar.gz
-          cd dist
-          tar -czf ../DouyinLiveRecorder_macOS_arm64.tar.gz DouyinLiveRecorder/
-          cd ..
+          cd dist && tar -czf ../DouyinLiveRecorder_macOS_arm64.tar.gz DouyinLiveRecorder/
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: DouyinLiveRecorder_macOS_arm64
           path: DouyinLiveRecorder_macOS_arm64.tar.gz
 
-      - name: Upload to Release (if tag push)
+      - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: DouyinLiveRecorder_macOS_arm64.tar.gz
 
-  # ==========================================================================
-  # Linux Build
-  # ==========================================================================
+  # ========================================================================
+  # Linux
+  # ========================================================================
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          # Install Node.js 20.x
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           sudo apt-get install -y nodejs
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Build with PyInstaller
+      - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
 
-      - name: Assemble Linux package
+      - name: Assemble package
         run: |
-          DISTDIR="dist/DouyinLiveRecorder"
+          DIST="dist/DouyinLiveRecorder"
 
-          # Bundle ffmpeg binary and its shared libs
-          mkdir -p "$DISTDIR/ffmpeg/bin"
-          cp "$(which ffmpeg)" "$DISTDIR/ffmpeg/bin/"
-          # Copy required .so libraries
-          for lib in $(ldd "$(which ffmpeg)" 2>/dev/null | grep -o '/lib/.*so[^ ]*' | head -10); do
-            cp "$lib" "$DISTDIR/ffmpeg/bin/" 2>/dev/null || true
-          done
+          # ffmpeg
+          cp "$(which ffmpeg)" "$DIST/ffmpeg"
+          mkdir -p "$DIST/ffmpeg"
+          cp "$(which ffmpeg)" "$DIST/ffmpeg/ffmpeg"
 
-          # Bundle node binary
-          mkdir -p "$DISTDIR/node/bin"
-          cp "$(which node)" "$DISTDIR/node/bin/"
+          # node
+          mkdir -p "$DIST/node"
+          cp "$(which node)" "$DIST/node/node"
 
-          # Generate default config files
-          mkdir -p "$DISTDIR/config" "$DISTDIR/logs"
-          cp config/config.ini "$DISTDIR/config/config.ini" 2>/dev/null || true
-          touch "$DISTDIR/config/URL_config.ini"
+          # config
+          mkdir -p "$DIST/config" "$DIST/logs"
+          cp config/config.ini "$DIST/config/config.ini" 2>/dev/null || true
+          touch "$DIST/config/URL_config.ini"
 
-          # Package as tar.gz
-          cd dist
-          tar -czf ../DouyinLiveRecorder_Linux_x64.tar.gz DouyinLiveRecorder/
-          cd ..
+          cd dist && tar -czf ../DouyinLiveRecorder_Linux_x64.tar.gz DouyinLiveRecorder/
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: DouyinLiveRecorder_Linux_x64
           path: DouyinLiveRecorder_Linux_x64.tar.gz
 
-      - name: Upload to Release (if tag push)
+      - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
