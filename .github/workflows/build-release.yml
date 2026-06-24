@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   # ========================================================================
-  # Windows
+  # Windows x64
   # ========================================================================
-  build-windows:
+  build-windows-x64:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +21,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          architecture: 'x64'
 
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg
+      - name: Download FFmpeg (x64)
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
@@ -34,7 +35,7 @@ jobs:
           Rename-Item $dir.Name ffmpeg_bundle
           Remove-Item ffmpeg.zip
 
-      - name: Download Node.js
+      - name: Download Node.js (x64)
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip" -OutFile node.zip
@@ -83,10 +84,78 @@ jobs:
           files: DouyinLiveRecorder_Windows_x64.zip
 
   # ========================================================================
-  # macOS
+  # Windows x86 (32-bit)
   # ========================================================================
-  build-macos:
-    runs-on: macos-latest
+  build-windows-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x86'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Download FFmpeg (x86)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath .
+          $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          Rename-Item $dir.Name ffmpeg_bundle
+          Remove-Item ffmpeg.zip
+
+      - name: Download Node.js (x86)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x86.zip" -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath .
+          $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          Rename-Item $dir.Name node
+          Remove-Item node.zip
+
+      - name: PyInstaller build
+        run: pyinstaller DouyinLiveRecorder.spec
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          $dist = "dist/DouyinLiveRecorder"
+
+          $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
+          New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+
+          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
+
+          New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
+          Copy-Item config/config.ini "$dist/config/config.ini" -ErrorAction SilentlyContinue
+          "" | Out-File -FilePath "$dist/config/URL_config.ini" -Encoding utf8
+
+          Copy-Item StopRecording.vbs "$dist/" -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_x86.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder_Windows_x86
+          path: DouyinLiveRecorder_Windows_x86.zip
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DouyinLiveRecorder_Windows_x86.zip
+
+  # ========================================================================
+  # Windows ARM64
+  # ========================================================================
+  build-windows-arm64:
+    runs-on: windows-11-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -94,100 +163,57 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system deps
-        run: |
-          brew install ffmpeg node@20
-          brew link --overwrite node@20 2>/dev/null || true
-
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
+
+      - name: Download FFmpeg (ARM64)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath .
+          $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          Rename-Item $dir.Name ffmpeg_bundle
+          Remove-Item ffmpeg.zip
+
+      - name: Download Node.js (ARM64)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-arm64.zip" -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath .
+          $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          Rename-Item $dir.Name node
+          Remove-Item node.zip
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
 
       - name: Assemble package
+        shell: pwsh
         run: |
-          DIST="dist/DouyinLiveRecorder"
+          $dist = "dist/DouyinLiveRecorder"
 
-          # ffmpeg
-          cp "$(which ffmpeg)" "$DIST/ffmpeg"
-          mkdir -p "$DIST/ffmpeg"
-          cp "$(which ffmpeg)" "$DIST/ffmpeg/ffmpeg"
+          $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
+          New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
+          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
-          # node
-          mkdir -p "$DIST/node"
-          cp "$(which node)" "$DIST/node/node"
+          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
-          # config
-          mkdir -p "$DIST/config" "$DIST/logs"
-          cp config/config.ini "$DIST/config/config.ini" 2>/dev/null || true
-          touch "$DIST/config/URL_config.ini"
+          New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
+          Copy-Item config/config.ini "$dist/config/config.ini" -ErrorAction SilentlyContinue
+          "" | Out-File -FilePath "$dist/config/URL_config.ini" -Encoding utf8
 
-          cd dist && tar -czf ../DouyinLiveRecorder_macOS_arm64.tar.gz DouyinLiveRecorder/
+          Copy-Item StopRecording.vbs "$dist/" -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_arm64.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DouyinLiveRecorder_macOS_arm64
-          path: DouyinLiveRecorder_macOS_arm64.tar.gz
+          name: DouyinLiveRecorder_Windows_arm64
+          path: DouyinLiveRecorder_Windows_arm64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DouyinLiveRecorder_macOS_arm64.tar.gz
-
-  # ========================================================================
-  # Linux
-  # ========================================================================
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-
-      - name: Install Python deps
-        run: pip install -r requirements.txt pyinstaller
-
-      - name: PyInstaller build
-        run: pyinstaller DouyinLiveRecorder.spec
-
-      - name: Assemble package
-        run: |
-          DIST="dist/DouyinLiveRecorder"
-
-          # ffmpeg
-          cp "$(which ffmpeg)" "$DIST/ffmpeg"
-          mkdir -p "$DIST/ffmpeg"
-          cp "$(which ffmpeg)" "$DIST/ffmpeg/ffmpeg"
-
-          # node
-          mkdir -p "$DIST/node"
-          cp "$(which node)" "$DIST/node/node"
-
-          # config
-          mkdir -p "$DIST/config" "$DIST/logs"
-          cp config/config.ini "$DIST/config/config.ini" 2>/dev/null || true
-          touch "$DIST/config/URL_config.ini"
-
-          cd dist && tar -czf ../DouyinLiveRecorder_Linux_x64.tar.gz DouyinLiveRecorder/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: DouyinLiveRecorder_Linux_x64
-          path: DouyinLiveRecorder_Linux_x64.tar.gz
-
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: DouyinLiveRecorder_Linux_x64.tar.gz
+          files: DouyinLiveRecorder_Windows_arm64.zip

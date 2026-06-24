@@ -15,6 +15,10 @@ uv run main.py                 # or: python main.py
 # Test a single platform's stream extraction
 uv run demo.py                 # Edit the `platform` variable at the bottom to pick a platform
 
+# Build distributable package (requires PyInstaller + ffmpeg + Node.js on PATH)
+pip install pyinstaller
+pyinstaller DouyinLiveRecorder.spec   # Output in dist/DouyinLiveRecorder/
+
 # Docker
 docker-compose up              # Start (add -d for background)
 docker-compose stop            # Stop
@@ -74,6 +78,8 @@ URL_config.ini → main.py (orchestration loop)
 
 **`StopRecording.vbs`** — Windows VBScript for gracefully stopping recordings: terminates `ffmpeg.exe` processes first, then terminates the main Python/DouyinLiveRecorder process 10 seconds later.
 
+**`DouyinLiveRecorder.spec`** — PyInstaller spec for one-directory mode. Declares the hidden imports (`src.*`, `msg_push`, `ffmpeg_install`, `i18n`, third-party packages), data files to bundle (JS scripts under `src/javascript/`, i18n locale files under `i18n/`), and packages to exclude (`tkinter`, `numpy`, `pandas`, etc.). The resulting `dist/DouyinLiveRecorder/` directory must also include `ffmpeg` and `node` binaries — those are copied in separately by the CI workflows, not by PyInstaller.
+
 ### Configuration
 
 - `config/config.ini` — All settings: recording format (ts/mkv/flv/mp4), quality, save paths, proxy, segmenting, push channels, per-platform cookies, and account credentials for platforms that need login (SOOP, FlexTV, PopkonTV, TwitCasting). Missing sections/options are auto-created on first read via `read_config_value()`.
@@ -92,6 +98,7 @@ URL_config.ini → main.py (orchestration loop)
 
 ### GitHub Actions workflows
 
+- **`.github/workflows/build-release.yml`** — Builds Windows distributable packages (x64, x86/32-bit, ARM64) using PyInstaller on tag pushes (`v*`) and manual dispatch. Each job: installs Python deps + PyInstaller, downloads architecture-matched ffmpeg + Node.js binaries, runs `pyinstaller DouyinLiveRecorder.spec`, assembles the final package (copies ffmpeg + node binaries, default config files), and uploads to the GitHub Release via `softprops/action-gh-release@v2`. Uses `windows-latest` for x64/x86, `windows-11-arm64` for ARM64.
 - **`.github/workflows/build-image.yml`** — Builds and pushes multi-arch Docker image (linux/amd64, linux/arm64) to Docker Hub on tag pushes. Also triggerable via manual dispatch.
 - **`.github/workflows/sync.yml`** — Daily upstream fork sync using `Fork-Sync-With-Upstream-action`. Only runs on forks.
 - **`.github/workflows/issue-translator.yml`** — Auto-translates non-English issue bodies/comments to English using `issues-translate-action`.

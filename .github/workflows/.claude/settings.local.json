@@ -2,7 +2,23 @@
   "permissions": {
     "allow": [
       "Bash(grep -ri \"_internal\\\\|MEIPASS\\\\|frozen\\\\|getattr.*sys.*frozen\" --include=\"*.py\" .)",
-      "Bash(grep -n \"sys._MEIPASS\\\\|sys.frozen\\\\|getattr\\(sys\" main.py src/*.py)"
+      "Bash(grep -n \"sys._MEIPASS\\\\|sys.frozen\\\\|getattr\\(sys\" main.py src/*.py)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh release *)",
+      "WebSearch",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(curl -s \"https://api.github.com/repos/ihmily/DouyinLiveRecorder/contents/.github/workflows\")",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(d['name']\\) for d in data]\")",
+      "Bash(curl -sL -H \"User-Agent: ClaudeCode\" \"https://api.github.com/repos/ihmily/DouyinLiveRecorder/contents/.github/workflows\")",
+      "Bash(curl -sL -H \"Accept: application/vnd.github+json\" -H \"User-Agent: ClaudeCode\" \"https://api.github.com/repos/ihmily/DouyinLiveRecorder/releases?per_page=3\")",
+      "Bash(python3 -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Add PyInstaller spec and multi-platform build workflow *)",
+      "Bash(git push *)",
+      "Bash(curl -sI https://github.com)",
+      "Bash(GIT_CURL_VERBOSE=1 git push origin master)",
+      "Bash(git tag *)",
+      "Bash(git ls-remote *)"
     ]
   }
 }
