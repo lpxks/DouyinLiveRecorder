@@ -2,8 +2,6 @@ name: Build Release
 
 on:
   push:
-    branches:
-      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -54,9 +52,8 @@ jobs:
         run: |
           $dist = "dist/DouyinLiveRecorder"
 
-          # ffmpeg — put at root (found via CWD) AND in ffmpeg/ (found via PATH)
+          # ffmpeg — copy to ffmpeg/ directory (added to PATH at runtime)
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
@@ -129,7 +126,6 @@ jobs:
           $dist = "dist/DouyinLiveRecorder"
 
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
@@ -197,7 +193,6 @@ jobs:
           $dist = "dist/DouyinLiveRecorder"
 
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $ffmpegExe.FullName "$dist/ffmpeg.exe"
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
