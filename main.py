@@ -547,7 +547,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
     while True:
         try:
-            record_finished = False
             run_once = False
             start_pushed = False
             new_record_url = ''
@@ -555,6 +554,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             retry = 0
             stream_interrupted = False
             interrupted_retries = 0
+            was_recording = False
             record_quality_zh, record_url, anchor_name = url_data
             record_quality = get_quality_code(record_quality_zh)
             proxy_address = proxy_addr
@@ -1212,6 +1212,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     ffmpeg_command.insert(2, proxy_address)
 
                                 recording.add(record_name)
+                                was_recording = True
                                 start_record_time = datetime.datetime.now()
                                 recording_time_list[record_name] = [start_record_time, record_quality_zh]
                                 rec_info = f"\r{anchor_name} 准备开始录制视频: {full_path}"
@@ -1332,6 +1333,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         flv_url = port_info.get('flv_url')
                                         if flv_url:
                                             recording.add(record_name)
+                                            was_recording = True
                                             start_record_time = datetime.datetime.now()
                                             recording_time_list[record_name] = [start_record_time, record_quality_zh]
 
@@ -1340,7 +1342,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             )
 
                                             if download_success:
-                                                record_finished = True
+                                                stream_interrupted = True
                                                 print(
                                                     f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制完成\n")
 
@@ -1611,10 +1613,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                                 count_time = time.time()
                                 stream_interrupted = True  # 直播录制中断, 标记为需要快速重试
+                                was_recording = False
 
                 except Exception as e:
                     logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
-                    stream_interrupted = True  # 录制异常中断, 也进行快速重试
+                    if was_recording:
+                        stream_interrupted = True  # 录制异常中断, 也进行快速重试
                     with max_request_lock:
                         error_count += 1
                         error_window.append(1)
@@ -1627,16 +1631,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     num = num + 60
                     color_obj.print_colored("\r瞬时错误太多,延迟加60秒", color_obj.YELLOW)
 
-                # 这里是.如果录制结束后,循环时间会暂时变成30s后检测一遍. 这样一定程度上防止主播卡顿造成少录
-                # 当30秒过后检测一遍后. 会回归正常设置的循环秒数
-                if record_finished:
-                    count_time_end = time.time() - count_time
-                    if count_time_end < 60:
-                        x = 30
-                    else:
-                        x = num
-                    record_finished = False
-                elif stream_interrupted and interrupted_retries < max_retry_interrupted:
+                # 直播录制结束(不论正常结束或断流中断), 统一走快速重试检测逻辑
+                # 50秒内轮询10次, 直播恢复则自动续录
+                if stream_interrupted and interrupted_retries < max_retry_interrupted:
                     # 断流重试逻辑: 当直播中断(主播下播/网络问题)后立即重试校验直播在线状态
                     # 缩短断流漏录时长, 直播恢复则自动续录
                     x = retry_interrupted_interval
