@@ -293,7 +293,8 @@ jobs:
           # Remove quarantine attributes (critical for macOS)
           xattr -cr "$dist"
 
-          # Package - use absolute path to avoid cd issues
+          # Package
+          cd dist
           zip -r "$GITHUB_WORKSPACE/DouyinLiveRecorder_macOS_x64.zip" DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
@@ -359,7 +360,8 @@ jobs:
           # Remove quarantine attributes (critical for macOS)
           xattr -cr "$dist"
 
-          # Package - use absolute path to avoid cd issues
+          # Package
+          cd dist
           zip -r "$GITHUB_WORKSPACE/DouyinLiveRecorder_macOS_arm64.zip" DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
