@@ -260,12 +260,13 @@ jobs:
           touch "$dist/config/URL_config.ini"
 
           # Package
-          zip -r "DouyinLiveRecorder_macOS_x64.zip" -C dist DouyinLiveRecorder/
+          cd dist
+          zip -r "../DouyinLiveRecorder_macOS_x64.zip" DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
         with:
           name: DouyinLiveRecorder_macOS_x64
-          path: DouyinLiveRecorder_macOS_x64.zip
+          path: dist/DouyinLiveRecorder_macOS_x64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -316,12 +317,13 @@ jobs:
           touch "$dist/config/URL_config.ini"
 
           # Package
-          zip -r "DouyinLiveRecorder_macOS_arm64.zip" -C dist DouyinLiveRecorder/
+          cd dist
+          zip -r "../DouyinLiveRecorder_macOS_arm64.zip" DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
         with:
           name: DouyinLiveRecorder_macOS_arm64
-          path: DouyinLiveRecorder_macOS_arm64.zip
+          path: dist/DouyinLiveRecorder_macOS_arm64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
