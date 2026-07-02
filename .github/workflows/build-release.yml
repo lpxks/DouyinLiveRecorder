@@ -217,3 +217,131 @@ jobs:
         with:
           files: DouyinLiveRecorder_Windows_arm64.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+
+  # ========================================================================
+  # macOS x64 (Intel)
+  # ========================================================================
+  build-macos-x64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Download FFmpeg (macOS x64)
+        run: |
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1.1/zip"
+          unzip ffmpeg.zip -d ffmpeg_bin
+          rm ffmpeg.zip
+
+      - name: Download Node.js (macOS x64)
+        run: |
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz"
+          mkdir -p node
+          tar -xzf node.tar.gz -C node --strip-components=1
+          rm node.tar.gz
+
+      - name: PyInstaller build
+        run: pyinstaller DouyinLiveRecorder.spec
+
+      - name: Assemble package
+        run: |
+          dist="dist/DouyinLiveRecorder"
+
+          # ffmpeg
+          mkdir -p "$dist/ffmpeg"
+          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          chmod +x "$dist/ffmpeg/ffmpeg"
+
+          # node
+          cp -r node/* "$dist/node/" 2>/dev/null || true
+
+          # Default config
+          mkdir -p "$dist/config" "$dist/logs"
+          cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
+          touch "$dist/config/URL_config.ini"
+
+          # Package
+          cd dist
+          zip -r "../DouyinLiveRecorder_macOS_x64.zip" DouyinLiveRecorder/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder_macOS_x64
+          path: DouyinLiveRecorder_macOS_x64.zip
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DouyinLiveRecorder_macOS_x64.zip
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+
+  # ========================================================================
+  # macOS ARM64 (Apple Silicon)
+  # ========================================================================
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Download FFmpeg (macOS ARM64)
+        run: |
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1.1/arm64/zip"
+          unzip ffmpeg.zip -d ffmpeg_bin
+          rm ffmpeg.zip
+
+      - name: Download Node.js (macOS ARM64)
+        run: |
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz"
+          mkdir -p node
+          tar -xzf node.tar.gz -C node --strip-components=1
+          rm node.tar.gz
+
+      - name: PyInstaller build
+        run: pyinstaller DouyinLiveRecorder.spec
+
+      - name: Assemble package
+        run: |
+          dist="dist/DouyinLiveRecorder"
+
+          # ffmpeg
+          mkdir -p "$dist/ffmpeg"
+          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          chmod +x "$dist/ffmpeg/ffmpeg"
+
+          # node
+          cp -r node/* "$dist/node/" 2>/dev/null || true
+
+          # Default config
+          mkdir -p "$dist/config" "$dist/logs"
+          cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
+          touch "$dist/config/URL_config.ini"
+
+          # Package
+          cd dist
+          zip -r "../DouyinLiveRecorder_macOS_arm64.zip" DouyinLiveRecorder/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder_macOS_arm64
+          path: DouyinLiveRecorder_macOS_arm64.zip
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DouyinLiveRecorder_macOS_arm64.zip
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
