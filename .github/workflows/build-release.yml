@@ -261,6 +261,10 @@ jobs:
           cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
           touch "$dist/config/URL_config.ini"
 
+          # Copy macOS launcher script
+          cp start_macos.sh "$dist/"
+          chmod +x "$dist/start_macos.sh"
+
           # Remove quarantine attributes (critical for macOS)
           xattr -cr "$dist"
 
@@ -322,6 +326,10 @@ jobs:
           mkdir -p "$dist/config" "$dist/logs"
           cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
           touch "$dist/config/URL_config.ini"
+
+          # Copy macOS launcher script
+          cp start_macos.sh "$dist/"
+          chmod +x "$dist/start_macos.sh"
 
           # Remove quarantine attributes (critical for macOS)
           xattr -cr "$dist"
