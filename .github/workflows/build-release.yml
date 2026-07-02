@@ -233,18 +233,9 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg (macOS x64)
+      - name: Install FFmpeg and Node.js via Homebrew
         run: |
-          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1.1/zip"
-          unzip ffmpeg.zip -d ffmpeg_bin
-          rm ffmpeg.zip
-
-      - name: Download Node.js (macOS x64)
-        run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz"
-          mkdir -p node
-          tar -xzf node.tar.gz -C node --strip-components=1
-          rm node.tar.gz
+          brew install ffmpeg node
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -253,13 +244,15 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg
+          # ffmpeg - copy from Homebrew
           mkdir -p "$dist/ffmpeg"
-          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          cp "$(which ffmpeg)" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node
-          cp -r node/* "$dist/node/" 2>/dev/null || true
+          # node - copy from Homebrew
+          mkdir -p "$dist/node"
+          cp "$(which node)" "$dist/node/node"
+          chmod +x "$dist/node/node"
 
           # Default config
           mkdir -p "$dist/config" "$dist/logs"
@@ -297,18 +290,9 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg (macOS ARM64)
+      - name: Install FFmpeg and Node.js via Homebrew
         run: |
-          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1.1/arm64/zip"
-          unzip ffmpeg.zip -d ffmpeg_bin
-          rm ffmpeg.zip
-
-      - name: Download Node.js (macOS ARM64)
-        run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz"
-          mkdir -p node
-          tar -xzf node.tar.gz -C node --strip-components=1
-          rm node.tar.gz
+          brew install ffmpeg node
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -317,13 +301,15 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg
+          # ffmpeg - copy from Homebrew
           mkdir -p "$dist/ffmpeg"
-          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          cp "$(which ffmpeg)" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node
-          cp -r node/* "$dist/node/" 2>/dev/null || true
+          # node - copy from Homebrew
+          mkdir -p "$dist/node"
+          cp "$(which node)" "$dist/node/node"
+          chmod +x "$dist/node/node"
 
           # Default config
           mkdir -p "$dist/config" "$dist/logs"
