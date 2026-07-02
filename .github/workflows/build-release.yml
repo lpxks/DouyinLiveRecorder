@@ -32,10 +32,33 @@ permissions:
 
 jobs:
   # ========================================================================
+  # Create/ensure the release exists before any build job uploads to it.
+  # Running 5 build jobs in parallel that each try to *create* the same
+  # release (especially the floating "latest" tag on workflow_dispatch) is a
+  # race condition — two jobs can hit the GitHub API at the same moment and
+  # one will fail. Creating the release once, up front, and having every
+  # build job depend on it via `needs` removes that race. Concurrent asset
+  # *uploads* to an already-existing release are fine.
+  # ========================================================================
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release exists
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
+
+  # ========================================================================
   # Windows x64
   # ========================================================================
   build-windows-x64:
-    if: github.event_name == 'push' || inputs.build_windows_x64
+    needs: create-release
+    if: |
+      always() &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      (github.event_name == 'push' || inputs.build_windows_x64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,20 +74,26 @@ jobs:
       - name: Download FFmpeg (x64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          if (-not $dir) { throw "FFmpeg archive did not contain an ffmpeg-* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name ffmpeg_bundle
           Remove-Item ffmpeg.zip
+          if (-not (Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe -ErrorAction SilentlyContinue)) { throw "ffmpeg.exe not found after extraction." }
 
       - name: Download Node.js (x64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          if (-not $dir) { throw "Node.js archive did not contain a node-v* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name node
           Remove-Item node.zip
+          if (-not (Test-Path "node/node.exe")) { throw "node.exe not found after extraction." }
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -72,15 +101,21 @@ jobs:
       - name: Assemble package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $dist = "dist/DouyinLiveRecorder"
+          if (-not (Test-Path $dist)) { throw "PyInstaller output '$dist' not found; build may have failed." }
 
           # ffmpeg — copy to ffmpeg/ directory (added to PATH at runtime)
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffmpegExe) { throw "ffmpeg.exe not found in ffmpeg_bundle." }
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
           # node — node/ dir (src/__init__.py adds ./node/ to PATH)
-          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
+          # Not silenced: a partial/failed copy here would ship a package that
+          # can't run any bundled JS, so this must fail the build loudly.
+          Copy-Item -Recurse node/* "$dist/node/" -Force
+          if (-not (Test-Path "$dist/node/node.exe")) { throw "node.exe missing from assembled package." }
 
           # Default config
           New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
@@ -109,7 +144,11 @@ jobs:
   # Windows x86 (32-bit)
   # ========================================================================
   build-windows-x86:
-    if: github.event_name == 'push' || inputs.build_windows_x86
+    needs: create-release
+    if: |
+      always() &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      (github.event_name == 'push' || inputs.build_windows_x86)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,20 +164,32 @@ jobs:
       - name: Download FFmpeg (x86)
         shell: pwsh
         run: |
+          # NOTE: gyan.dev and BtbN no longer publish real 32-bit (i686) FFmpeg builds —
+          # "all builds are 64-bit". This still pulls the 64-bit build, so the resulting
+          # package will NOT run on genuine 32-bit Windows. It works today only because
+          # GitHub's windows-latest runner is itself 64-bit, so pyinstaller's x86 Python
+          # can still spawn the 64-bit ffmpeg.exe as a subprocess under WOW64. If you need
+          # to support real 32-bit Windows hosts, you'll have to compile ffmpeg yourself.
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          if (-not $dir) { throw "FFmpeg archive did not contain an ffmpeg-* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name ffmpeg_bundle
           Remove-Item ffmpeg.zip
+          if (-not (Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe -ErrorAction SilentlyContinue)) { throw "ffmpeg.exe not found after extraction." }
 
       - name: Download Node.js (x86)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x86.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          if (-not $dir) { throw "Node.js archive did not contain a node-v* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name node
           Remove-Item node.zip
+          if (-not (Test-Path "node/node.exe")) { throw "node.exe not found after extraction." }
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -146,13 +197,17 @@ jobs:
       - name: Assemble package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $dist = "dist/DouyinLiveRecorder"
+          if (-not (Test-Path $dist)) { throw "PyInstaller output '$dist' not found; build may have failed." }
 
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffmpegExe) { throw "ffmpeg.exe not found in ffmpeg_bundle." }
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
-          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
+          Copy-Item -Recurse node/* "$dist/node/" -Force
+          if (-not (Test-Path "$dist/node/node.exe")) { throw "node.exe missing from assembled package." }
 
           New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
           Copy-Item config/config.ini "$dist/config/config.ini" -ErrorAction SilentlyContinue
@@ -178,35 +233,49 @@ jobs:
   # Windows ARM64
   # ========================================================================
   build-windows-arm64:
-    if: github.event_name == 'push' || inputs.build_windows_arm64
-    runs-on: windows-11-arm64
+    needs: create-release
+    if: |
+      always() &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      (github.event_name == 'push' || inputs.build_windows_arm64)
+    runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          architecture: 'arm64'
 
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg (ARM64)
+      - name: Download FFmpeg (ARM64, native)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          # gyan.dev only ships 64-bit x86 (win64) builds, NOT arm64 — using it here
+          # would silently bundle an x64 ffmpeg.exe into the arm64 package. Use BtbN's
+          # native winarm64 build instead (the "latest" tag always points at the newest build).
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-winarm64-gpl.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "ffmpeg-*" | Select-Object -First 1
+          if (-not $dir) { throw "FFmpeg archive did not contain an ffmpeg-* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name ffmpeg_bundle
           Remove-Item ffmpeg.zip
+          if (-not (Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe -ErrorAction SilentlyContinue)) { throw "ffmpeg.exe not found after extraction." }
 
       - name: Download Node.js (ARM64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-arm64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
+          if (-not $dir) { throw "Node.js archive did not contain a node-v* directory; download or archive layout may have changed." }
           Rename-Item $dir.Name node
           Remove-Item node.zip
+          if (-not (Test-Path "node/node.exe")) { throw "node.exe not found after extraction." }
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -214,13 +283,17 @@ jobs:
       - name: Assemble package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $dist = "dist/DouyinLiveRecorder"
+          if (-not (Test-Path $dist)) { throw "PyInstaller output '$dist' not found; build may have failed." }
 
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffmpegExe) { throw "ffmpeg.exe not found in ffmpeg_bundle." }
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
-          Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
+          Copy-Item -Recurse node/* "$dist/node/" -Force
+          if (-not (Test-Path "$dist/node/node.exe")) { throw "node.exe missing from assembled package." }
 
           New-Item -Force -ItemType Directory "$dist/config", "$dist/logs" | Out-Null
           Copy-Item config/config.ini "$dist/config/config.ini" -ErrorAction SilentlyContinue
@@ -246,7 +319,11 @@ jobs:
   # macOS x64 (Intel)
   # ========================================================================
   build-macos-x64:
-    if: github.event_name == 'push' || inputs.build_macos_x64
+    needs: create-release
+    if: |
+      always() &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      (github.event_name == 'push' || inputs.build_macos_x64)
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
@@ -276,7 +353,9 @@ jobs:
 
       - name: Assemble package
         run: |
+          set -euo pipefail
           dist="dist/DouyinLiveRecorder"
+          [ -d "$dist" ] || { echo "PyInstaller output '$dist' not found; build may have failed." >&2; exit 1; }
 
           # Copy static ffmpeg binary
           mkdir -p "$dist/ffmpeg"
@@ -284,6 +363,13 @@ jobs:
           chmod +x "$dist/ffmpeg/ffmpeg"
 
           # Copy static node binary
+          # NOTE: only the bare "node" binary is bundled here, matching the path
+          # ("$dist/node/node") that src/__init__.py adds to PATH at runtime.
+          # The Windows jobs bundle the *entire* node/ zip contents (which includes
+          # npm, npx, and node_modules) at that same relative path. If the app or
+          # any bundled JS script ever shells out to `npm`/`npx`, or relies on
+          # node's own lib/ files, this macOS build will be missing them — worth
+          # confirming whether that gap matters before shipping.
           mkdir -p "$dist/node"
           cp node_static/bin/node "$dist/node/node"
           chmod +x "$dist/node/node"
@@ -320,7 +406,11 @@ jobs:
   # macOS ARM64 (Apple Silicon)
   # ========================================================================
   build-macos-arm64:
-    if: github.event_name == 'push' || inputs.build_macos_arm64
+    needs: create-release
+    if: |
+      always() &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
+      (github.event_name == 'push' || inputs.build_macos_arm64)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -350,7 +440,9 @@ jobs:
 
       - name: Assemble package
         run: |
+          set -euo pipefail
           dist="dist/DouyinLiveRecorder"
+          [ -d "$dist" ] || { echo "PyInstaller output '$dist' not found; build may have failed." >&2; exit 1; }
 
           # Copy static ffmpeg binary
           mkdir -p "$dist/ffmpeg"
@@ -358,6 +450,13 @@ jobs:
           chmod +x "$dist/ffmpeg/ffmpeg"
 
           # Copy static node binary
+          # NOTE: only the bare "node" binary is bundled here, matching the path
+          # ("$dist/node/node") that src/__init__.py adds to PATH at runtime.
+          # The Windows jobs bundle the *entire* node/ zip contents (which includes
+          # npm, npx, and node_modules) at that same relative path. If the app or
+          # any bundled JS script ever shells out to `npm`/`npx`, or relies on
+          # node's own lib/ files, this macOS build will be missing them — worth
+          # confirming whether that gap matters before shipping.
           mkdir -p "$dist/node"
           cp node_static/bin/node "$dist/node/node"
           chmod +x "$dist/node/node"
