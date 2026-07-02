@@ -260,8 +260,7 @@ jobs:
           touch "$dist/config/URL_config.ini"
 
           # Package
-          cd dist
-          zip -r "../DouyinLiveRecorder_macOS_x64.zip" DouyinLiveRecorder/
+          zip -r "DouyinLiveRecorder_macOS_x64.zip" -C dist DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -317,8 +316,7 @@ jobs:
           touch "$dist/config/URL_config.ini"
 
           # Package
-          cd dist
-          zip -r "../DouyinLiveRecorder_macOS_arm64.zip" DouyinLiveRecorder/
+          zip -r "DouyinLiveRecorder_macOS_arm64.zip" -C dist DouyinLiveRecorder/
 
       - uses: actions/upload-artifact@v4
         with:
