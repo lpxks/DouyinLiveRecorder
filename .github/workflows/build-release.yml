@@ -233,18 +233,9 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg (macOS x64)
+      - name: Install FFmpeg and Node.js via Homebrew
         run: |
-          curl -L -o ffmpeg.zip "https://www.osxexperts.net/ffmpeg711intel.zip"
-          unzip ffmpeg.zip -d ffmpeg_bin
-          rm ffmpeg.zip
-
-      - name: Download Node.js (macOS x64)
-        run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz"
-          mkdir -p node_pkg
-          tar -xzf node.tar.gz -C node_pkg --strip-components=1
-          rm node.tar.gz
+          brew install ffmpeg node
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -253,20 +244,25 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg - copy static binary
+          # ffmpeg - resolve symlink and copy actual binary
           mkdir -p "$dist/ffmpeg"
-          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          ffmpeg_path="$(realpath "$(which ffmpeg)")"
+          cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node - copy binary
+          # node - resolve symlink and copy actual binary
           mkdir -p "$dist/node"
-          cp node_pkg/bin/node "$dist/node/node"
+          node_path="$(realpath "$(which node)")"
+          cp "$node_path" "$dist/node/node"
           chmod +x "$dist/node/node"
 
           # Default config
           mkdir -p "$dist/config" "$dist/logs"
           cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
           touch "$dist/config/URL_config.ini"
+
+          # Remove quarantine attributes (critical for macOS)
+          xattr -cr "$dist"
 
           # Package
           cd dist
@@ -299,18 +295,9 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Download FFmpeg (macOS ARM64)
+      - name: Install FFmpeg and Node.js via Homebrew
         run: |
-          curl -L -o ffmpeg.zip "https://www.osxexperts.net/ffmpeg711arm.zip"
-          unzip ffmpeg.zip -d ffmpeg_bin
-          rm ffmpeg.zip
-
-      - name: Download Node.js (macOS ARM64)
-        run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz"
-          mkdir -p node_pkg
-          tar -xzf node.tar.gz -C node_pkg --strip-components=1
-          rm node.tar.gz
+          brew install ffmpeg node
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -319,20 +306,25 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg - copy static binary
+          # ffmpeg - resolve symlink and copy actual binary
           mkdir -p "$dist/ffmpeg"
-          cp ffmpeg_bin/ffmpeg "$dist/ffmpeg/ffmpeg"
+          ffmpeg_path="$(realpath "$(which ffmpeg)")"
+          cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node - copy binary
+          # node - resolve symlink and copy actual binary
           mkdir -p "$dist/node"
-          cp node_pkg/bin/node "$dist/node/node"
+          node_path="$(realpath "$(which node)")"
+          cp "$node_path" "$dist/node/node"
           chmod +x "$dist/node/node"
 
           # Default config
           mkdir -p "$dist/config" "$dist/logs"
           cp config/config.ini "$dist/config/config.ini" 2>/dev/null || true
           touch "$dist/config/URL_config.ini"
+
+          # Remove quarantine attributes (critical for macOS)
+          xattr -cr "$dist"
 
           # Package
           cd dist
