@@ -258,9 +258,18 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Install FFmpeg and Node.js via Homebrew
+      - name: Download static FFmpeg (Intel)
         run: |
-          brew install ffmpeg node
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getlatest/ffmpeg/intel-64"
+          unzip ffmpeg.zip -d ffmpeg_static
+          rm ffmpeg.zip
+
+      - name: Download Node.js (x64)
+        run: |
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz"
+          tar xzf node.tar.gz
+          mv node-v20.18.0-darwin-x64 node_static
+          rm node.tar.gz
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -269,16 +278,14 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg - resolve symlink and copy actual binary
+          # Copy static ffmpeg binary
           mkdir -p "$dist/ffmpeg"
-          ffmpeg_path=$(python3 -c "import os; print(os.path.realpath('$(which ffmpeg)'))")
-          cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
+          cp ffmpeg_static/ffmpeg "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node - resolve symlink and copy actual binary
+          # Copy static node binary
           mkdir -p "$dist/node"
-          node_path=$(python3 -c "import os; print(os.path.realpath('$(which node)'))")
-          cp "$node_path" "$dist/node/node"
+          cp node_static/bin/node "$dist/node/node"
           chmod +x "$dist/node/node"
 
           # Default config
@@ -325,9 +332,18 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Install FFmpeg and Node.js via Homebrew
+      - name: Download static FFmpeg (ARM64)
         run: |
-          brew install ffmpeg node
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getlatest/ffmpeg/arm-64"
+          unzip ffmpeg.zip -d ffmpeg_static
+          rm ffmpeg.zip
+
+      - name: Download Node.js (ARM64)
+        run: |
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz"
+          tar xzf node.tar.gz
+          mv node-v20.18.0-darwin-arm64 node_static
+          rm node.tar.gz
 
       - name: PyInstaller build
         run: pyinstaller DouyinLiveRecorder.spec
@@ -336,16 +352,14 @@ jobs:
         run: |
           dist="dist/DouyinLiveRecorder"
 
-          # ffmpeg - resolve symlink and copy actual binary
+          # Copy static ffmpeg binary
           mkdir -p "$dist/ffmpeg"
-          ffmpeg_path=$(python3 -c "import os; print(os.path.realpath('$(which ffmpeg)'))")
-          cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
+          cp ffmpeg_static/ffmpeg "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
-          # node - resolve symlink and copy actual binary
+          # Copy static node binary
           mkdir -p "$dist/node"
-          node_path=$(python3 -c "import os; print(os.path.realpath('$(which node)'))")
-          cp "$node_path" "$dist/node/node"
+          cp node_static/bin/node "$dist/node/node"
           chmod +x "$dist/node/node"
 
           # Default config
