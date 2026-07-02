@@ -271,13 +271,13 @@ jobs:
 
           # ffmpeg - resolve symlink and copy actual binary
           mkdir -p "$dist/ffmpeg"
-          ffmpeg_path="$(realpath "$(which ffmpeg)")"
+          ffmpeg_path=$(python3 -c "import os; print(os.path.realpath('$(which ffmpeg)'))")
           cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
           # node - resolve symlink and copy actual binary
           mkdir -p "$dist/node"
-          node_path="$(realpath "$(which node)")"
+          node_path=$(python3 -c "import os; print(os.path.realpath('$(which node)'))")
           cp "$node_path" "$dist/node/node"
           chmod +x "$dist/node/node"
 
@@ -338,13 +338,13 @@ jobs:
 
           # ffmpeg - resolve symlink and copy actual binary
           mkdir -p "$dist/ffmpeg"
-          ffmpeg_path="$(realpath "$(which ffmpeg)")"
+          ffmpeg_path=$(python3 -c "import os; print(os.path.realpath('$(which ffmpeg)'))")
           cp "$ffmpeg_path" "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
 
           # node - resolve symlink and copy actual binary
           mkdir -p "$dist/node"
-          node_path="$(realpath "$(which node)")"
+          node_path=$(python3 -c "import os; print(os.path.realpath('$(which node)'))")
           cp "$node_path" "$dist/node/node"
           chmod +x "$dist/node/node"
 
