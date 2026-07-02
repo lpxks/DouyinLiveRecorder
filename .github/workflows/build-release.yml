@@ -5,6 +5,27 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      build_windows_x64:
+        description: 'Build Windows x64'
+        type: boolean
+        default: true
+      build_windows_x86:
+        description: 'Build Windows x86'
+        type: boolean
+        default: false
+      build_windows_arm64:
+        description: 'Build Windows ARM64'
+        type: boolean
+        default: true
+      build_macos_x64:
+        description: 'Build macOS x64 (Intel)'
+        type: boolean
+        default: false
+      build_macos_arm64:
+        description: 'Build macOS ARM64 (Apple Silicon)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -14,6 +35,7 @@ jobs:
   # Windows x64
   # ========================================================================
   build-windows-x64:
+    if: github.event_name == 'push' || inputs.build_windows_x64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +109,7 @@ jobs:
   # Windows x86 (32-bit)
   # ========================================================================
   build-windows-x86:
+    if: github.event_name == 'push' || inputs.build_windows_x86
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +178,7 @@ jobs:
   # Windows ARM64
   # ========================================================================
   build-windows-arm64:
+    if: github.event_name == 'push' || inputs.build_windows_arm64
     runs-on: windows-11-arm64
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +246,7 @@ jobs:
   # macOS x64 (Intel)
   # ========================================================================
   build-macos-x64:
+    if: github.event_name == 'push' || inputs.build_macos_x64
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
@@ -288,6 +313,7 @@ jobs:
   # macOS ARM64 (Apple Silicon)
   # ========================================================================
   build-macos-arm64:
+    if: github.event_name == 'push' || inputs.build_macos_arm64
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
