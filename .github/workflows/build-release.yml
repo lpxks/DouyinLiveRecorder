@@ -260,7 +260,7 @@ jobs:
 
       - name: Download static FFmpeg (Intel)
         run: |
-          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getlatest/ffmpeg/intel-64"
+          curl -L -o ffmpeg.zip "https://www.osxexperts.net/ffmpeg7intel.zip"
           unzip ffmpeg.zip -d ffmpeg_static
           rm ffmpeg.zip
 
@@ -334,7 +334,7 @@ jobs:
 
       - name: Download static FFmpeg (ARM64)
         run: |
-          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getlatest/ffmpeg/arm-64"
+          curl -L -o ffmpeg.zip "https://www.osxexperts.net/ffmpeg7arm.zip"
           unzip ffmpeg.zip -d ffmpeg_static
           rm ffmpeg.zip
 
