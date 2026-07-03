@@ -256,6 +256,8 @@ jobs:
 
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
+
+      - name: Download FFmpeg (ARM64, native)
         shell: pwsh
         run: |
           # gyan.dev only ships 64-bit x86 (win64) builds, NOT arm64 — using it here
