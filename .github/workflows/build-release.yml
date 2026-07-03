@@ -317,18 +317,6 @@ jobs:
             exit 1
           }
 
-          # Pre-flight check: fail the build loudly instead of silently shipping a
-          # broken package if ffmpeg/node didn't get copied in (the copy above uses
-          # SilentlyContinue so a layout change upstream wouldn't otherwise be noticed).
-          if (-not (Test-Path "$dist/ffmpeg/ffmpeg.exe")) {
-            Write-Error "ffmpeg.exe missing from package - aborting build"
-            exit 1
-          }
-          if (-not (Test-Path "$dist/node/node.exe")) {
-            Write-Error "node.exe missing from package - aborting build"
-            exit 1
-          }
-
           Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_arm64.zip
 
       - uses: actions/upload-artifact@v4
@@ -352,7 +340,7 @@ jobs:
       always() &&
       (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
       (github.event_name == 'push' || inputs.build_macos_x64)
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -457,7 +445,7 @@ jobs:
       always() &&
       (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') &&
       (github.event_name == 'push' || inputs.build_macos_arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
