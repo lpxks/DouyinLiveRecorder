@@ -70,7 +70,7 @@ config_file = f'{script_path}/config/config.ini'
 url_config_file = f'{script_path}/config/URL_config.ini'
 backup_dir = f'{script_path}/backup_config'
 text_encoding = 'utf-8-sig'
-rstr = r"[\/\\\:\*\？?\"\<\>\|&#.。,， ~！· ]"
+rstr = r"[\/\\\:\*\？?\"\<\>\|&#.。,， ~！· ]"
 default_path = f'{script_path}/downloads'
 os.makedirs(default_path, exist_ok=True)
 file_update_lock = threading.Lock()
@@ -1964,170 +1964,220 @@ while True:
 
 
     try:
-        url_comments, line_list, url_line_list = [[] for _ in range(3)]
-        with (open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file):
-            for origin_line in file:
-                if origin_line in line_list:
-                    delete_line(url_config_file, origin_line)
-                line_list.append(origin_line)
-                line = origin_line.strip()
-                if len(line) < 18:
+        url_comments, url_line_list, url_tuples_list = [[] for _ in range(3)]
+        seen_full_lines = set()      # 用于检测完全重复的行
+        seen_urls = set()            # 用于检测重复URL
+        output_lines = []            # 最终写回文件的行
+        file_modified = False        # 标记文件是否被修改
+
+        # 一次性读取所有行到内存
+        with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
+            raw_lines = file.readlines()
+
+        for origin_line in raw_lines:
+            stripped = origin_line.strip()
+            
+            # 保留空行
+            if not stripped:
+                output_lines.append(origin_line)
+                continue
+            
+            # 检测完全重复的行（非注释且长度>=18）
+            is_comment = stripped.startswith('#')
+            if len(stripped) >= 18 and not is_comment:
+                if stripped in seen_full_lines:
+                    # 完全重复，整行丢弃
+                    file_modified = True
                     continue
+                seen_full_lines.add(stripped)
+            
+            # 处理有效内容
+            line = stripped.lstrip('#') if is_comment else stripped
+            
+            if len(line) < 18:
+                output_lines.append(origin_line)
+                continue
 
-                line_spilt = line.split('主播: ')
-                if len(line_spilt) > 2:
-                    line = update_file(url_config_file, line, f'{line_spilt[0]}主播: {line_spilt[-1]}')
+            # 修正多个"主播: "的格式错误
+            line_spilt = line.split('主播: ')
+            if len(line_spilt) > 2:
+                corrected = f'{line_spilt[0]}主播: {line_spilt[-1]}'
+                if corrected != line:
+                    line = corrected
+                    file_modified = True
+                    # 同步修正origin_line，保留原始换行符
+                    suffix = origin_line[len(origin_line.rstrip('\n\r')):]
+                    origin_line = corrected + suffix
 
-                is_comment_line = line.startswith("#")
-                if is_comment_line:
-                    line = line.lstrip('#')
+            if is_comment:
+                line = line.lstrip('#')
 
-                if re.search('[,，]', line):
-                    split_line = re.split('[,，]', line)
+            if re.search('[,，]', line):
+                split_line = re.split('[,，]', line)
+            else:
+                split_line = [line, '']
+
+            if len(split_line) == 1:
+                url = split_line[0]
+                quality, name = [video_record_quality, '']
+            elif len(split_line) == 2:
+                if contains_url(split_line[0]):
+                    quality = video_record_quality
+                    url, name = split_line
                 else:
-                    split_line = [line, '']
+                    quality, url = split_line
+                    name = ''
+            else:
+                quality, url, name = split_line
 
-                if len(split_line) == 1:
-                    url = split_line[0]
-                    quality, name = [video_record_quality, '']
-                elif len(split_line) == 2:
-                    if contains_url(split_line[0]):
-                        quality = video_record_quality
-                        url, name = split_line
+            if quality not in ("原画", "蓝光", "超清", "高清", "标清", "流畅"):
+                quality = '原画'
+
+            url = 'https://' + url if '://' not in url else url
+            url_host = url.split('/')[2]
+
+            platform_host = [
+                'live.douyin.com',
+                'v.douyin.com',
+                'www.douyin.com',
+                'live.kuaishou.com',
+                'www.huya.com',
+                'www.douyu.com',
+                'www.yy.com',
+                'live.bilibili.com',
+                'www.redelight.cn',
+                'www.xiaohongshu.com',
+                'xhslink.com',
+                'www.bigo.tv',
+                'slink.bigovideo.tv',
+                'app.blued.cn',
+                'cc.163.com',
+                'qiandurebo.com',
+                'fm.missevan.com',
+                'look.163.com',
+                'twitcasting.tv',
+                'live.baidu.com',
+                'weibo.com',
+                'fanxing.kugou.com',
+                'fanxing2.kugou.com',
+                'mfanxing.kugou.com',
+                'www.huajiao.com',
+                'www.7u66.com',
+                'wap.7u66.com',
+                'live.acfun.cn',
+                'm.acfun.cn',
+                'live.tlclw.com',
+                'wap.tlclw.com',
+                'live.ybw1666.com',
+                'wap.ybw1666.com',
+                'www.inke.cn',
+                'www.zhihu.com',
+                'www.haixiutv.com',
+                "h5webcdnp.vvxqiu.com",
+                "17.live",
+                'www.lang.live',
+                "m.pp.weimipopo.com",
+                "v.6.cn",
+                "m.6.cn",
+                'www.lehaitv.com',
+                'h.catshow168.com',
+                'e.tb.cn',
+                'huodong.m.taobao.com',
+                '3.cn',
+                'eco.m.jd.com',
+                'www.miguvideo.com',
+                'm.miguvideo.com',
+                'show.lailianjie.com',
+                'www.imkktv.com',
+                'www.picarto.tv'
+            ]
+            overseas_platform_host = [
+                'www.tiktok.com',
+                'play.sooplive.co.kr',
+                'm.sooplive.co.kr',
+                'www.sooplive.com',
+                'm.sooplive.com',
+                'www.pandalive.co.kr',
+                'www.winktv.co.kr',
+                'www.flextv.co.kr',
+                'www.ttinglive.com',
+                'www.popkontv.com',
+                'www.twitch.tv',
+                'www.liveme.com',
+                'www.showroom-live.com',
+                'chzzk.naver.com',
+                'm.chzzk.naver.com',
+                'live.shopee.',
+                '.shp.ee',
+                'www.youtube.com',
+                'youtu.be',
+                'www.faceit.com'
+            ]
+
+            platform_host.extend(overseas_platform_host)
+            clean_url_host_list = (
+                "live.douyin.com",
+                "live.bilibili.com",
+                "www.huajiao.com",
+                "www.zhihu.com",
+                "www.huya.com",
+                "chzzk.naver.com",
+                "www.liveme.com",
+                "www.haixiutv.com",
+                "v.6.cn",
+                "m.6.cn",
+                'www.lehaitv.com'
+            )
+
+            if 'live.shopee.' in url_host or '.shp.ee' in url_host:
+                url_host = 'live.shopee.' if 'live.shopee.' in url_host else '.shp.ee'
+
+            if url_host in platform_host or any(ext in url for ext in (".flv", ".m3u8")):
+                # 清理URL参数
+                if url_host in clean_url_host_list:
+                    old_url = url
+                    url = url.split('?')[0]
+                    if url != old_url:
+                        file_modified = True
+                        origin_line = origin_line.replace(old_url, url)
+
+                if 'xiaohongshu' in url:
+                    host_id = re.search('&host_id=(.*?)(?=&|$)', url)
+                    if host_id:
+                        old_url = url
+                        url = url.split('?')[0] + f'?host_id={host_id.group(1)}'
+                        if url != old_url:
+                            file_modified = True
+                            origin_line = origin_line.replace(old_url, url)
+
+                url_comments = [i for i in url_comments if url not in i]
+                if is_comment:
+                    url_comments.append(url)
+                    # 确保注释行以#开头
+                    if not stripped.startswith('#'):
+                        output_lines.append('#' + origin_line)
                     else:
-                        quality, url = split_line
-                        name = ''
+                        output_lines.append(origin_line)
                 else:
-                    quality, url, name = split_line
-
-                if quality not in ("原画", "蓝光", "超清", "高清", "标清", "流畅"):
-                    quality = '原画'
-
-                if url not in url_line_list:
-                    url_line_list.append(url)
+                    # 检查URL是否重复
+                    if url in seen_urls:
+                        # 重复URL，丢弃该行
+                        file_modified = True
+                        continue
+                    seen_urls.add(url)
+                    output_lines.append(origin_line)
+                    new_line = (quality, url, name)
+                    url_tuples_list.append(new_line)
+            else:
+                # 未知链接，注释掉
+                if not is_comment:
+                    color_obj.print_colored(f"\r{stripped} 本行包含未知链接.此条跳过", color_obj.YELLOW)
+                    output_lines.append('#' + origin_line)
+                    file_modified = True
                 else:
-                    delete_line(url_config_file, origin_line)
+                    output_lines.append(origin_line)
 
-                url = 'https://' + url if '://' not in url else url
-                url_host = url.split('/')[2]
-
-                platform_host = [
-                    'live.douyin.com',
-                    'v.douyin.com',
-                    'www.douyin.com',
-                    'live.kuaishou.com',
-                    'www.huya.com',
-                    'www.douyu.com',
-                    'www.yy.com',
-                    'live.bilibili.com',
-                    'www.redelight.cn',
-                    'www.xiaohongshu.com',
-                    'xhslink.com',
-                    'www.bigo.tv',
-                    'slink.bigovideo.tv',
-                    'app.blued.cn',
-                    'cc.163.com',
-                    'qiandurebo.com',
-                    'fm.missevan.com',
-                    'look.163.com',
-                    'twitcasting.tv',
-                    'live.baidu.com',
-                    'weibo.com',
-                    'fanxing.kugou.com',
-                    'fanxing2.kugou.com',
-                    'mfanxing.kugou.com',
-                    'www.huajiao.com',
-                    'www.7u66.com',
-                    'wap.7u66.com',
-                    'live.acfun.cn',
-                    'm.acfun.cn',
-                    'live.tlclw.com',
-                    'wap.tlclw.com',
-                    'live.ybw1666.com',
-                    'wap.ybw1666.com',
-                    'www.inke.cn',
-                    'www.zhihu.com',
-                    'www.haixiutv.com',
-                    "h5webcdnp.vvxqiu.com",
-                    "17.live",
-                    'www.lang.live',
-                    "m.pp.weimipopo.com",
-                    "v.6.cn",
-                    "m.6.cn",
-                    'www.lehaitv.com',
-                    'h.catshow168.com',
-                    'e.tb.cn',
-                    'huodong.m.taobao.com',
-                    '3.cn',
-                    'eco.m.jd.com',
-                    'www.miguvideo.com',
-                    'm.miguvideo.com',
-                    'show.lailianjie.com',
-                    'www.imkktv.com',
-                    'www.picarto.tv'
-                ]
-                overseas_platform_host = [
-                    'www.tiktok.com',
-                    'play.sooplive.co.kr',
-                    'm.sooplive.co.kr',
-                    'www.sooplive.com',
-                    'm.sooplive.com',
-                    'www.pandalive.co.kr',
-                    'www.winktv.co.kr',
-                    'www.flextv.co.kr',
-                    'www.ttinglive.com',
-                    'www.popkontv.com',
-                    'www.twitch.tv',
-                    'www.liveme.com',
-                    'www.showroom-live.com',
-                    'chzzk.naver.com',
-                    'm.chzzk.naver.com',
-                    'live.shopee.',
-                    '.shp.ee',
-                    'www.youtube.com',
-                    'youtu.be',
-                    'www.faceit.com'
-                ]
-
-                platform_host.extend(overseas_platform_host)
-                clean_url_host_list = (
-                    "live.douyin.com",
-                    "live.bilibili.com",
-                    "www.huajiao.com",
-                    "www.zhihu.com",
-                    "www.huya.com",
-                    "chzzk.naver.com",
-                    "www.liveme.com",
-                    "www.haixiutv.com",
-                    "v.6.cn",
-                    "m.6.cn",
-                    'www.lehaitv.com'
-                )
-
-                if 'live.shopee.' in url_host or '.shp.ee' in url_host:
-                    url_host = 'live.shopee.' if 'live.shopee.' in url_host else '.shp.ee'
-
-                if url_host in platform_host or any(ext in url for ext in (".flv", ".m3u8")):
-                    if url_host in clean_url_host_list:
-                        url = update_file(url_config_file, old_str=url, new_str=url.split('?')[0])
-
-                    if 'xiaohongshu' in url:
-                        host_id = re.search('&host_id=(.*?)(?=&|$)', url)
-                        if host_id:
-                            new_url = url.split('?')[0] + f'?host_id={host_id.group(1)}'
-                            url = update_file(url_config_file, old_str=url, new_str=new_url)
-
-                    url_comments = [i for i in url_comments if url not in i]
-                    if is_comment_line:
-                        url_comments.append(url)
-                    else:
-                        new_line = (quality, url, name)
-                        url_tuples_list.append(new_line)
-                else:
-                    if not origin_line.startswith('#'):
-                        color_obj.print_colored(f"\r{origin_line.strip()} 本行包含未知链接.此条跳过", color_obj.YELLOW)
-                        update_file(url_config_file, old_str=origin_line, new_str=origin_line, start_str='#')
-
+        # 处理need_update_line_list
         while len(need_update_line_list):
             a = need_update_line_list.pop()
             replace_words = a.split('|')
@@ -2138,7 +2188,21 @@ while True:
                 else:
                     start_with = None
                     new_word = replace_words[1]
-                update_file(url_config_file, old_str=replace_words[0], new_str=new_word, start_str=start_with)
+                # 在output_lines中查找并替换
+                for i, out_line in enumerate(output_lines):
+                    if replace_words[0] in out_line:
+                        if start_with:
+                            output_lines[i] = start_with + out_line.replace(replace_words[0], new_word)
+                        else:
+                            output_lines[i] = out_line.replace(replace_words[0], new_word)
+                        file_modified = True
+                        break
+
+        # 统一写回文件（仅当内容有变化时）
+        if file_modified:
+            with file_update_lock:
+                with open(url_config_file, "w", encoding=text_encoding) as f:
+                    f.writelines(output_lines)
 
         text_no_repeat_url = list(set(url_tuples_list))
 
