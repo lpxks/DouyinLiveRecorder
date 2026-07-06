@@ -1966,7 +1966,7 @@ while True:
     try:
         url_comments, url_line_list, url_tuples_list = [[] for _ in range(3)]
         seen_full_lines = set()      # 用于检测完全重复的行
-        seen_urls = set()            # 用于检测重复URL
+        seen_url_info = {}           # url -> {'is_comment', 'output_idx'} 用于检测重复URL
         output_lines = []            # 最终写回文件的行
         file_modified = False        # 标记文件是否被修改
 
@@ -2005,9 +2005,10 @@ while True:
                 if corrected != line:
                     line = corrected
                     file_modified = True
-                    # 同步修正origin_line，保留原始换行符
+                    # 同步修正origin_line，保留#前缀和原始换行符
                     suffix = origin_line[len(origin_line.rstrip('\n\r')):]
-                    origin_line = corrected + suffix
+                    prefix = '#' if is_comment else ''
+                    origin_line = prefix + corrected + suffix
 
             if is_comment:
                 line = line.lstrip('#')
@@ -2150,7 +2151,30 @@ while True:
                             file_modified = True
                             origin_line = origin_line.replace(old_url, url)
 
-                url_comments = [i for i in url_comments if url not in i]
+                # 检查URL是否重复（无论注释/非注释）
+                if url in seen_url_info:
+                    first_info = seen_url_info[url]
+                    # 第一条是注释，新的是非注释 → 解开第一条，删除新行
+                    if first_info['is_comment'] and not is_comment:
+                        old_line = output_lines[first_info['output_idx']]
+                        # 去掉行首空白、# 及 # 后所有空白字符，保留原有缩进
+                        lstripped = old_line.lstrip()
+                        leading_ws = old_line[:len(old_line) - len(lstripped)]
+                        if lstripped.startswith('#'):
+                            output_lines[first_info['output_idx']] = leading_ws + lstripped[1:].lstrip()
+                        url_comments = [i for i in url_comments if i != url]
+                        url_tuples_list.append((quality, url, name))
+                        first_info['is_comment'] = False
+                    # 所有重复情况：删除新行，保留第一条
+                    file_modified = True
+                    continue
+
+                # 首次出现的URL，记录位置和注释状态
+                seen_url_info[url] = {
+                    'is_comment': is_comment,
+                    'output_idx': len(output_lines)
+                }
+
                 if is_comment:
                     url_comments.append(url)
                     # 确保注释行以#开头
@@ -2159,12 +2183,6 @@ while True:
                     else:
                         output_lines.append(origin_line)
                 else:
-                    # 检查URL是否重复
-                    if url in seen_urls:
-                        # 重复URL，丢弃该行
-                        file_modified = True
-                        continue
-                    seen_urls.add(url)
                     output_lines.append(origin_line)
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
