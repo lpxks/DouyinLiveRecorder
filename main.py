@@ -556,6 +556,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             interrupted_retries = 0
             was_recording = False
             record_quality_zh, record_url, anchor_name = url_data
+            record_name = f'序号{count_variable} {anchor_name}'
             record_quality = get_quality_code(record_quality_zh)
             proxy_address = proxy_addr
             platform = '未知平台'
@@ -577,6 +578,11 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             # print(f'\r代理地址:{proxy_address}')
             # print(f'\r全局代理:{global_proxy}')
             while True:
+                if record_url in url_comments:
+                    print(f"[{record_name}]已被注释,本条线程将会退出")
+                    clear_record_info(record_name, record_url)
+                    return
+
                 try:
                     port_info = []
                     if record_url.find("douyin.com/") > -1:
@@ -1059,11 +1065,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     else:
                         anchor_name = clean_name(anchor_name)
                         record_name = f'序号{count_variable} {anchor_name}'
-
-                        if record_url in url_comments:
-                            print(f"[{anchor_name}]已被注释,本条线程将会退出")
-                            clear_record_info(record_name, record_url)
-                            return
 
                         if not url_data[-1] and run_once is False:
                             if new_record_url:
