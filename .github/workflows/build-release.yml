@@ -30,6 +30,9 @@ on:
 permissions:
   contents: write
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
   # ========================================================================
   # Create/ensure the release exists before any build job uploads to it.
