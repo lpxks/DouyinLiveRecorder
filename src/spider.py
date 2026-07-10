@@ -3039,7 +3039,10 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
     live_id = get_params(url, 'id')
     if not live_id:
         html_str = await async_req(url, proxy_addr=proxy_addr, headers=headers)
-        redirect_url = re.findall("var url = '(.*?)';", html_str)[0]
+        url_match = re.findall("var url = '(.*?)';", html_str)
+        if not url_match:
+            return {"anchor_name": '', "is_live": False}
+        redirect_url = url_match[0]
         live_id = get_params(redirect_url, 'id')
 
     params = {
@@ -3058,22 +3061,28 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
         'data': '{"liveId":"' + live_id + '","creatorId":null}',
     }
 
-    for i in range(2):
+    for i in range(3):
         t13 = int(time.time() * 1000)
         params['t'] = t13
 
         # 只有Cookie包含_m_h5_tk和_m_h5_tk_enc时才计算签名
         if '_m_h5_tk' in headers['Cookie'] and '_m_h5_tk_enc' in headers['Cookie']:
             app_key = '12574478'
-            _m_h5_tk = re.findall('_m_h5_tk=(.*?);', headers['Cookie'])[0]
-            pre_sign_str = f'{_m_h5_tk.split("_")[0]}&{t13}&{app_key}&' + params['data']
-            sign = hashlib.md5(pre_sign_str.encode("utf-8")).hexdigest()
-            params['sign'] = sign
+            _m_h5_tk_match = re.findall('_m_h5_tk=([^;]+)', headers['Cookie'])
+            if _m_h5_tk_match:
+                pre_sign_str = f'{_m_h5_tk_match[0].split("_")[0]}&{t13}&{app_key}&' + params['data']
+                sign = hashlib.md5(pre_sign_str.encode("utf-8")).hexdigest()
+                params['sign'] = sign
 
         api = f'https://h5api.m.taobao.com/h5/mtop.mediaplatform.live.livedetail/4.0/?{urllib.parse.urlencode(params)}'
         jsonp_str, new_cookie = await async_req(url=api, proxy_addr=proxy_addr, headers=headers, timeout=20,
                                                 return_cookies=True, include_cookies=True)
-        json_data = utils.jsonp_to_json(jsonp_str)
+
+        try:
+            json_data = utils.jsonp_to_json(jsonp_str)
+        except Exception as e:
+            print(f'第{i + 1}次尝试获取中, Error: JSONP解析失败, {e}')
+            continue
 
         ret_msg = json_data['ret']
         if ret_msg == ['SUCCESS::调用成功']:
@@ -3097,14 +3106,14 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
 
             return result
         else:
-            print(f'Error: Taobao live data fetch failed, {ret_msg[0]}')
+            print(f'第{i + 1}次尝试获取中, Error: Taobao live data fetch failed, {ret_msg[0]}')
 
         # 更新Cookie：将新Cookie转换为字符串
         if '_m_h5_tk' in new_cookie and '_m_h5_tk_enc' in new_cookie:
             new_cookie_str = '; '.join(f'{k}={v}' for k, v in new_cookie.items())
             headers['Cookie'] = new_cookie_str
         else:
-            print('Error: Try to update cookie failed, please update the cookies in the configuration file')
+            print(f'第{i + 1}次尝试获取中, Error: Try to update cookie failed, please update the cookies in the configuration file')
 
 
 @trace_error_decorator
