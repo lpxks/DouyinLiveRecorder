@@ -93,7 +93,7 @@ jobs:
       - name: Download Node.js (x64)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip" -OutFile node.zip
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.23.1/node-v22.23.1-win-x64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
           Rename-Item $dir.Name node
@@ -178,7 +178,7 @@ jobs:
       - name: Download Node.js (x86)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x86.zip" -OutFile node.zip
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.23.1/node-v22.23.1-win-x86.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
           Rename-Item $dir.Name node
@@ -283,7 +283,7 @@ jobs:
       - name: Download Node.js (ARM64)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-arm64.zip" -OutFile node.zip
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.23.1/node-v22.23.1-win-arm64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
           $dir = Get-ChildItem -Directory -Filter "node-v*" | Select-Object -First 1
           Rename-Item $dir.Name node
@@ -369,9 +369,9 @@ jobs:
 
       - name: Download Node.js (x64)
         run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz"
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-x64.tar.gz"
           tar xzf node.tar.gz
-          mv node-v20.18.0-darwin-x64 node_static
+          mv node-v22.23.1-darwin-x64 node_static
           rm node.tar.gz
 
       - name: PyInstaller build
@@ -471,9 +471,9 @@ jobs:
 
       - name: Download Node.js (ARM64)
         run: |
-          curl -L -o node.tar.gz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz"
+          curl -L -o node.tar.gz "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-arm64.tar.gz"
           tar xzf node.tar.gz
-          mv node-v20.18.0-darwin-arm64 node_static
+          mv node-v22.23.1-darwin-arm64 node_static
           rm node.tar.gz
 
       - name: PyInstaller build
