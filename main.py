@@ -663,7 +663,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                             port_info = asyncio.run(stream.get_bilibili_stream_url(
                                 json_data, video_quality=record_quality, cookies=bili_cookie, proxy_addr=proxy_address))
 
-                    elif record_url.find("http://xhslink.com/") > -1 or \
+                    elif record_url.find("https://xhslink.com/") > -1 or \
                             record_url.find("https://www.xiaohongshu.com/") > -1:
                         platform = '小红书直播'
                         with semaphore:
@@ -2083,7 +2083,7 @@ while True:
                 "m.6.cn",
                 'www.lehaitv.com',
                 'h.catshow168.com',
-                'e.tb.cn',
+                'm.tb.cn',
                 'huodong.m.taobao.com',
                 '3.cn',
                 'eco.m.jd.com',
