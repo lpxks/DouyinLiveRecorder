@@ -3038,6 +3038,7 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
 
     if '_m_h5_tk' not in headers['Cookie']:
         print('Error: Cookies is empty! please input correct cookies')
+        return {"anchor_name": "", "is_live": False}
 
     live_id = get_params(url, 'id')
     if not live_id:
@@ -3063,7 +3064,11 @@ async def get_taobao_stream_url(url: str, proxy_addr: OptionalStr = None, cookie
 
     for i in range(2):
         app_key = '12574478'
-        _m_h5_tk = re.findall('_m_h5_tk=(.*?);', headers['Cookie'])[0]
+        _m_h5_tk_match = re.findall('_m_h5_tk=(.*?);', headers['Cookie'])
+        if not _m_h5_tk_match:
+            print('Error: Failed to extract _m_h5_tk from Cookie')
+            return {"anchor_name": "", "is_live": False}
+        _m_h5_tk = _m_h5_tk_match[0]
         t13 = int(time.time() * 1000)
         pre_sign_str = f'{_m_h5_tk.split("_")[0]}&{t13}&{app_key}&' + params['data']
         sign = execjs.compile(open(f'{JS_SCRIPT_PATH}/taobao-sign.js').read()).call('sign', pre_sign_str)
