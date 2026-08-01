@@ -1766,6 +1766,8 @@ def read_config_value(config_parser: configparser.RawConfigParser, section: str,
             config_parser.add_section('账号密码')
         return config_parser.get(section, option)
     except (configparser.NoSectionError, configparser.NoOptionError):
+        if section not in config_parser.sections():
+            config_parser.add_section(section)
         config_parser.set(section, option, str(default_value))
         with open(config_file, 'w', encoding=text_encoding) as f:
             config_parser.write(f)
