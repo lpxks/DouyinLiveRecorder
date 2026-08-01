@@ -42,9 +42,11 @@ URL_config.ini → main.py (orchestration loop)
   → msg_push.py (push start/stop notifications via DingTalk/Telegram/Email/Bark/ntfy/PushPlus)
 ```
 
+Note: `StreamCap/` in the repo root is a git-ignored copy of the sibling StreamCap project (see README "相关项目") — not part of this codebase; don't read or modify it as if it were.
+
 ### Key modules
 
-**`main.py`** (~2154 lines) — The orchestration hub. Loads `config/config.ini` and `config/URL_config.ini`, then enters a `start_record()` loop per URL on a thread. Handles: URL parsing (platform detection by domain + `if/elif` chain against `platform_host`/`overseas_platform_host` lists), FFmpeg subprocess lifecycle, video post-processing (TS→MP4 conversion, H264 re-encoding, segmenting, subtitle generation), dynamic request throttling based on error rate, and message push routing. Config is read via `read_config_value()` which auto-creates missing sections/options with defaults.
+**`main.py`** (~2170 lines) — The orchestration hub. Loads `config/config.ini` and `config/URL_config.ini`, then enters a `start_record()` loop per URL on a thread. Handles: URL parsing (platform detection by domain + `if/elif` chain against `platform_host`/`overseas_platform_host` lists), FFmpeg subprocess lifecycle, video post-processing (TS→MP4 conversion, H264 re-encoding, segmenting, subtitle generation), dynamic request throttling based on error rate, and message push routing. Config is read via `read_config_value()` which auto-creates missing sections/options with defaults.
 
 **`src/spider.py`** (~3394 lines) — Platform-specific API clients. Each platform gets one or more async functions (e.g., `get_douyin_app_stream_data`, `get_tiktok_stream_data`). They call platform APIs, handle anti-crawler signing (a_bogus for Douyin, custom JS crypto for others), and return normalized dicts with status, stream URLs, title, and anchor name. Some platforms (SOOP, FlexTV, PopkonTV) auto-login and refresh credentials.
 
@@ -95,10 +97,10 @@ URL_config.ini → main.py (orchestration loop)
 - **Platform detection**: `start_record()` uses `record_url.find(<domain>) > -1` in a long `if/elif` chain. `main.py` also maintains `platform_host` and `overseas_platform_host` lists to validate URLs during config loading — unrecognized hosts get auto-commented.
 - **Quality names**: Video quality is mapped from Chinese labels: `原画`→OD, `蓝光`→BD, `超清`→UHD, `高清`→HD, `标清`→SD, `流畅`→LD.
 - **Proxy per-platform**: The `使用代理录制的平台` config comma-separated list determines which platforms use the proxy; `start_record()` checks if the URL contains a platform name from this list before enabling the proxy.
+- **Anchor-name writeback**: When a `URL_config.ini` line has no anchor name, the recording thread reports `record_url|record_url,主播: <name>` to the global `need_update_line_list` **every fetch cycle** (no one-shot gate). The main loop consumes this list each iteration and rewrites the config line. The consumer dedups via `line_contains_anchor()` (skips when the target line already has `主播:`), so repeat reports can't duplicate. Rationale: writeback is a lost-update race with the user's editor when the config is edited while running — a one-shot report + one-shot pop would permanently lose the anchor when the editor's save clobbers the write; per-round reporting self-heals it. Pitfall: `update_file()` matches the old line by substring (`old_str in line`) and rewrites the whole file when there's no match — it now logs a `logger.warning` on no-match instead of failing silently — keep the report and consume stages decoupled and don't remove the consumer-side dedup.
 
 ### GitHub Actions workflows
 
 - **`.github/workflows/build-release.yml`** — Builds Windows distributable packages (x64, x86/32-bit, ARM64) using PyInstaller on tag pushes (`v*`) and manual dispatch. Each job: installs Python deps + PyInstaller, downloads architecture-matched ffmpeg + Node.js binaries, runs `pyinstaller DouyinLiveRecorder.spec`, assembles the final package (copies ffmpeg + node binaries, default config files), and uploads to the GitHub Release via `softprops/action-gh-release@v2`. Uses `windows-latest` for x64/x86, `windows-11-arm64` for ARM64.
-- **`.github/workflows/build-image.yml`** — Builds and pushes multi-arch Docker image (linux/amd64, linux/arm64) to Docker Hub on tag pushes. Also triggerable via manual dispatch.
 - **`.github/workflows/sync.yml`** — Daily upstream fork sync using `Fork-Sync-With-Upstream-action`. Only runs on forks.
 - **`.github/workflows/issue-translator.yml`** — Auto-translates non-English issue bodies/comments to English using `issues-translate-action`.
