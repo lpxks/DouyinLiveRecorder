@@ -1,6 +1,12 @@
 import unittest
+import sys
+from pathlib import Path
 
-from url_parser import dedup_priority_action, is_priority, split_url_line, strip_priority
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from url_parser import (
+    dedup_priority_action, find_writeback_index, is_priority, split_url_line, strip_priority,
+)
 
 
 class UrlParserTest(unittest.TestCase):
@@ -81,6 +87,23 @@ class DedupPriorityActionTest(unittest.TestCase):
         self.assertIsNone(dedup_priority_action(False, False, False, False))
         self.assertIsNone(dedup_priority_action(False, True, True, False))
         self.assertIsNone(dedup_priority_action(False, True, True, True))
+
+
+class FindWritebackIndexTest(unittest.TestCase):
+    def test_prefers_active_line_over_annotation_comment(self):
+        lines = ['#https://x.com/1,优先: 是', 'https://x.com/1']
+        self.assertEqual(find_writeback_index(lines, 'https://x.com/1'), 1)
+
+    def test_active_line_already_first(self):
+        lines = ['https://x.com/1', '#https://x.com/1,优先: 是']
+        self.assertEqual(find_writeback_index(lines, 'https://x.com/1'), 0)
+
+    def test_falls_back_to_comment_when_only_comment_matches(self):
+        lines = ['#https://x.com/1,主播: 张三']
+        self.assertEqual(find_writeback_index(lines, 'https://x.com/1'), 0)
+
+    def test_returns_none_when_no_match(self):
+        self.assertIsNone(find_writeback_index(['https://other.com/2'], 'https://x.com/1'))
 
 
 if __name__ == '__main__':

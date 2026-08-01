@@ -71,3 +71,20 @@ def dedup_priority_action(has_priority: bool, is_comment: bool,
     if kept_is_priority and kept_is_comment and not is_comment and not has_priority:
         return 'keep_comment_and_active'
     return None
+
+
+def find_writeback_index(lines, url):
+    """主播名写回时定位目标行：优先命中非注释行，无则回退注释行。
+
+    同一 URL 可能存在「生效行 + 注释标注行」两行布局，写回主播名
+    必须落在生效行上，否则会持续改写注释标注（文件churn）。
+    """
+    fallback = None
+    for i, line in enumerate(lines):
+        if url in line:
+            if line.lstrip().startswith('#'):
+                if fallback is None:
+                    fallback = i
+            else:
+                return i
+    return fallback

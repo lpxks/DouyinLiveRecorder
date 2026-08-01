@@ -38,7 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
-from url_parser import dedup_priority_action, split_url_line
+from url_parser import dedup_priority_action, find_writeback_index, split_url_line
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -1845,7 +1845,7 @@ while True:
     disk_space_limit = float(read_config_value(config, '录制设置', '录制空间剩余阈值(gb)', 1.0))
     split_time = str(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800))
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
-    priority_delay = int(read_config_value(config, '优先监控', '优先监控轮询间隔(秒)', 3))
+    priority_delay = max(1, int(read_config_value(config, '优先监控', '优先监控轮询间隔(秒)', 3)))
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
@@ -2234,15 +2234,15 @@ while True:
                 else:
                     start_with = None
                     new_word = replace_words[1]
-                # 在output_lines中查找并替换
-                for i, out_line in enumerate(output_lines):
-                    if replace_words[0] in out_line:
-                        if start_with:
-                            output_lines[i] = start_with + out_line.replace(replace_words[0], new_word)
-                        else:
-                            output_lines[i] = out_line.replace(replace_words[0], new_word)
-                        file_modified = True
-                        break
+                # 在output_lines中查找并替换（优先命中非注释行，避免改写注释标注）
+                i = find_writeback_index(output_lines, replace_words[0])
+                if i is not None:
+                    out_line = output_lines[i]
+                    if start_with:
+                        output_lines[i] = start_with + out_line.replace(replace_words[0], new_word)
+                    else:
+                        output_lines[i] = out_line.replace(replace_words[0], new_word)
+                    file_modified = True
 
         # 统一写回文件（仅当内容有变化时）
         if file_modified:
