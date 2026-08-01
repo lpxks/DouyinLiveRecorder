@@ -2137,8 +2137,8 @@ while True:
                 # 检查URL是否重复（无论注释/非注释）
                 if url in seen_url_info:
                     first_info = seen_url_info[url]
-                    # 合并优先标记：任一重复行带标记，保留行也补上，避免标记被去重丢弃
-                    if has_priority and not first_info.get('is_priority', False):
+                    # 合并优先标记：仅采纳非注释行的标记（注释行表示暂停，不生效也不改写文件）
+                    if has_priority and not is_comment and not first_info.get('is_priority', False):
                         kept_line = output_lines[first_info['output_idx']]
                         body = kept_line.rstrip('\n\r')
                         suffix = kept_line[len(body):]
