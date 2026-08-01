@@ -37,6 +37,7 @@ from msg_push import (
 from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
+from retry import retry_delay
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -1633,11 +1634,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     color_obj.print_colored("\r瞬时错误太多,延迟加60秒", color_obj.YELLOW)
 
                 # 直播录制结束(不论正常结束或断流中断), 统一走快速重试检测逻辑
-                # 50秒内轮询10次, 直播恢复则自动续录
+                # 前5次2~5秒随机, 后5次5~8秒随机
                 if stream_interrupted and interrupted_retries < max_retry_interrupted:
-                    # 断流重试逻辑: 当直播中断(主播下播/网络问题)后立即重试校验直播在线状态
-                    # 缩短断流漏录时长, 直播恢复则自动续录
-                    x = retry_interrupted_interval
+                    x = retry_delay(interrupted_retries)
                     interrupted_retries += 1
                     print(f"\r{anchor_name} 直播中断, 第{interrupted_retries}次重试检测中... "
                           f"(最多{max_retry_interrupted}次)", end="")
@@ -1839,7 +1838,6 @@ while True:
     disk_space_limit = float(read_config_value(config, '录制设置', '录制空间剩余阈值(gb)', 1.0))
     split_time = str(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800))
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
-    retry_interrupted_interval = int(read_config_value(config, '录制设置', '断流重试间隔(秒)', 5))
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
