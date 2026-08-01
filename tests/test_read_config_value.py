@@ -1,15 +1,19 @@
 import ast
 import configparser
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 def load_read_config_value():
     """从 main.py 提取 read_config_value 的真实源码执行，避免导入整个程序。"""
-    tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
+    main_py = Path(__file__).resolve().parents[1] / 'main.py'
+    tree = ast.parse(main_py.read_text(encoding='utf-8'))
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == 'read_config_value':
             module = ast.Module(body=[node], type_ignores=[])
