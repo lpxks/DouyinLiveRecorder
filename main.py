@@ -38,7 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
-from url_parser import is_priority
+from url_parser import split_url_line
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -1964,12 +1964,6 @@ while True:
                            f"Exiting program due to the disk space limit being reached.")
             sys.exit(-1)
 
-
-    def contains_url(string: str) -> bool:
-        pattern = r"(https?://)?(www\.)?[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:\d+)?(/.*)?"
-        return re.search(pattern, string) is not None
-
-
     try:
         url_comments, url_line_list, url_tuples_list = [[] for _ in range(3)]
         seen_full_lines = set()      # 用于检测完全重复的行
@@ -1978,7 +1972,7 @@ while True:
         file_modified = False        # 标记文件是否被修改
 
         # 一次性读取所有行到内存
-        priority_urls = set()
+        new_priority_urls = set()
         with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
             raw_lines = file.readlines()
 
@@ -2021,26 +2015,7 @@ while True:
             if is_comment:
                 line = line.lstrip('#')
 
-            if re.search('[,，]', line):
-                split_line = re.split('[,，]', line)
-            else:
-                split_line = [line, '']
-
-            if len(split_line) == 1:
-                url = split_line[0]
-                quality, name = [video_record_quality, '']
-            elif len(split_line) == 2:
-                if contains_url(split_line[0]):
-                    quality = video_record_quality
-                    url, name = split_line
-                else:
-                    quality, url = split_line
-                    name = ''
-            else:
-                quality, url, name = split_line
-
-            if quality not in ("原画", "蓝光", "超清", "高清", "标清", "流畅"):
-                quality = '原画'
+            quality, url, name, has_priority = split_url_line(line, video_record_quality)
 
             url = 'https://' + url if '://' not in url else url
             url_host = url.split('/')[2]
@@ -2162,6 +2137,14 @@ while True:
                 # 检查URL是否重复（无论注释/非注释）
                 if url in seen_url_info:
                     first_info = seen_url_info[url]
+                    # 合并优先标记：任一重复行带标记，保留行也补上，避免标记被去重丢弃
+                    if has_priority and not first_info.get('is_priority', False):
+                        kept_line = output_lines[first_info['output_idx']]
+                        body = kept_line.rstrip('\n\r')
+                        suffix = kept_line[len(body):]
+                        output_lines[first_info['output_idx']] = body + ',优先: 是' + suffix
+                        first_info['is_priority'] = True
+                        file_modified = True
                     # 第一条是注释，新的是非注释 → 解开第一条，删除新行
                     if first_info['is_comment'] and not is_comment:
                         old_line = output_lines[first_info['output_idx']]
@@ -2172,9 +2155,10 @@ while True:
                             output_lines[first_info['output_idx']] = leading_ws + lstripped[1:].lstrip()
                         url_comments = [i for i in url_comments if i != url]
                         url_tuples_list.append((quality, url, name))
-                        if is_priority(line):
-                            priority_urls.add(url)
                         first_info['is_comment'] = False
+                    # 去重后按保留行决定优先级（含合并标记后立即生效）
+                    if first_info.get('is_priority', False) and not first_info['is_comment']:
+                        new_priority_urls.add(url)
                     # 所有重复情况：删除新行，保留第一条
                     file_modified = True
                     continue
@@ -2182,6 +2166,7 @@ while True:
                 # 首次出现的URL，记录位置和注释状态
                 seen_url_info[url] = {
                     'is_comment': is_comment,
+                    'is_priority': has_priority,
                     'output_idx': len(output_lines)
                 }
 
@@ -2196,8 +2181,8 @@ while True:
                     output_lines.append(origin_line)
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
-                    if is_priority(line):
-                        priority_urls.add(url)
+                    if has_priority:
+                        new_priority_urls.add(url)
             else:
                 # 未知链接，注释掉
                 if not is_comment:
@@ -2206,6 +2191,9 @@ while True:
                     file_modified = True
                 else:
                     output_lines.append(origin_line)
+
+        # 解析完成后一次性替换优先集合，避免解析期间线程看到空集合
+        priority_urls = new_priority_urls
 
         # 处理need_update_line_list
         while len(need_update_line_list):
