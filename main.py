@@ -1968,6 +1968,7 @@ while True:
         url_comments, url_line_list, url_tuples_list = [[] for _ in range(3)]
         seen_full_lines = set()      # 用于检测完全重复的行
         seen_url_info = {}           # url -> {'is_comment', 'output_idx'} 用于检测重复URL
+        retained_annotations = {}    # url -> 保留的注释标注行 output_idx（暂停标注去重基准）
         output_lines = []            # 最终写回文件的行
         file_modified = False        # 标记文件是否被修改
 
@@ -2149,14 +2150,28 @@ while True:
                         first_info['is_priority'] = True
                         file_modified = True
                     elif action == 'keep_comment':
-                        # 生效行 + 带标记注释行：保留注释作为暂停标注，不合并、不激活
-                        output_lines.append(origin_line)
+                        # 生效行 + 带标记注释行：保留注释作为暂停标注（同 URL 仅保留一条），不激活
+                        if url not in retained_annotations:
+                            output_lines.append(origin_line)
+                            retained_annotations[url] = len(output_lines) - 1
+                        else:
+                            file_modified = True  # 重复的注释标注丢弃
                         continue
                     elif action == 'keep_comment_and_active':
                         # 带标记注释行 + 无标记生效行：两者都保留，消除顺序差异
-                        output_lines.append(origin_line)
-                        url_comments = [i for i in url_comments if i != url]
-                        url_tuples_list.append((quality, url, name))
+                        if url not in retained_annotations:
+                            retained_annotations[url] = first_info['output_idx']
+                            output_lines.append(origin_line)
+                            url_comments = [i for i in url_comments if i != url]
+                            url_tuples_list.append((quality, url, name))
+                            # 去重基准切换到新增生效行，后续生效行重复按其去重
+                            seen_url_info[url] = {
+                                'is_comment': False,
+                                'is_priority': False,
+                                'output_idx': len(output_lines) - 1,
+                            }
+                        else:
+                            file_modified = True  # 已有标注注释: 丢弃多余生效行
                         continue
                     # 第一条是注释，新的是非注释 → 解开第一条，删除新行
                     if first_info['is_comment'] and not is_comment:
