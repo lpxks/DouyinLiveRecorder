@@ -38,6 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
+from url_parser import is_priority
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -55,6 +56,7 @@ error_threshold = 5
 monitoring = 0
 running_list = []
 url_tuples_list = []
+priority_urls = set()
 url_comments = []
 text_no_repeat_url = []
 create_var = locals()
@@ -1625,7 +1627,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         error_count += 1
                         error_window.append(1)
 
-                num = random.randint(-5, 5) + delay_default
+                if record_url in priority_urls:
+                    num = random.randint(-1, 1) + priority_delay
+                else:
+                    num = random.randint(-5, 5) + delay_default
                 if num < 0:
                     num = 0
 
@@ -1838,6 +1843,7 @@ while True:
     disk_space_limit = float(read_config_value(config, '录制设置', '录制空间剩余阈值(gb)', 1.0))
     split_time = str(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800))
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
+    priority_delay = int(read_config_value(config, '优先监控', '优先监控轮询间隔(秒)', 3))
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
@@ -1970,6 +1976,7 @@ while True:
         file_modified = False        # 标记文件是否被修改
 
         # 一次性读取所有行到内存
+        priority_urls = set()
         with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
             raw_lines = file.readlines()
 
@@ -2163,6 +2170,8 @@ while True:
                             output_lines[first_info['output_idx']] = leading_ws + lstripped[1:].lstrip()
                         url_comments = [i for i in url_comments if i != url]
                         url_tuples_list.append((quality, url, name))
+                        if is_priority(line):
+                            priority_urls.add(url)
                         first_info['is_comment'] = False
                     # 所有重复情况：删除新行，保留第一条
                     file_modified = True
@@ -2185,6 +2194,8 @@ while True:
                     output_lines.append(origin_line)
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
+                    if is_priority(line):
+                        priority_urls.add(url)
             else:
                 # 未知链接，注释掉
                 if not is_comment:
