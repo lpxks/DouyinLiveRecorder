@@ -1,6 +1,6 @@
 import unittest
 
-from url_parser import is_priority, split_url_line, strip_priority
+from url_parser import dedup_priority_action, is_priority, split_url_line, strip_priority
 
 
 class UrlParserTest(unittest.TestCase):
@@ -53,6 +53,34 @@ class SplitUrlLineTest(unittest.TestCase):
         quality, url, name, has_priority = split_url_line('https://x.com/1', '原画')
         self.assertEqual((quality, url, name), ('原画', 'https://x.com/1', ''))
         self.assertFalse(has_priority)
+
+
+class DedupPriorityActionTest(unittest.TestCase):
+    def test_merge_marker_into_kept_comment(self):
+        # 注释+注释，当前行带标记 → 合并进保留注释行（仅保留标注，不激活）
+        self.assertEqual(dedup_priority_action(True, True, True, False), 'merge')
+
+    def test_merge_marker_into_kept_active(self):
+        # 生效+生效，当前行带标记 → 合并并激活（去重保护）
+        self.assertEqual(dedup_priority_action(True, False, False, False), 'merge')
+
+    def test_keep_comment_annotation(self):
+        # 生效行 + 带标记注释行 → 保留注释标注，不合并、不激活
+        self.assertEqual(dedup_priority_action(True, True, False, False), 'keep_comment')
+
+    def test_keep_comment_and_active(self):
+        # 带标记注释行 + 无标记生效行 → 两者都保留，不激活（消除顺序差异）
+        self.assertEqual(dedup_priority_action(False, False, True, True),
+                         'keep_comment_and_active')
+
+    def test_no_action_when_kept_already_marked(self):
+        self.assertIsNone(dedup_priority_action(True, True, False, True))
+        self.assertIsNone(dedup_priority_action(True, False, True, True))
+
+    def test_no_action_without_marker_signal(self):
+        self.assertIsNone(dedup_priority_action(False, False, False, False))
+        self.assertIsNone(dedup_priority_action(False, True, True, False))
+        self.assertIsNone(dedup_priority_action(False, True, True, True))
 
 
 if __name__ == '__main__':

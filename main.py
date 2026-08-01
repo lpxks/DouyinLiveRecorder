@@ -38,7 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
-from url_parser import split_url_line
+from url_parser import dedup_priority_action, split_url_line
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -2137,14 +2137,27 @@ while True:
                 # 检查URL是否重复（无论注释/非注释）
                 if url in seen_url_info:
                     first_info = seen_url_info[url]
-                    # 合并优先标记：仅采纳非注释行的标记（注释行表示暂停，不生效也不改写文件）
-                    if has_priority and not is_comment and not first_info.get('is_priority', False):
+                    # 去重时的优先标记处理：标注保留、不激活（见 dedup_priority_action）
+                    action = dedup_priority_action(
+                        has_priority, is_comment,
+                        first_info['is_comment'], first_info.get('is_priority', False))
+                    if action == 'merge':
                         kept_line = output_lines[first_info['output_idx']]
                         body = kept_line.rstrip('\n\r')
                         suffix = kept_line[len(body):]
                         output_lines[first_info['output_idx']] = body + ',优先: 是' + suffix
                         first_info['is_priority'] = True
                         file_modified = True
+                    elif action == 'keep_comment':
+                        # 生效行 + 带标记注释行：保留注释作为暂停标注，不合并、不激活
+                        output_lines.append(origin_line)
+                        continue
+                    elif action == 'keep_comment_and_active':
+                        # 带标记注释行 + 无标记生效行：两者都保留，消除顺序差异
+                        output_lines.append(origin_line)
+                        url_comments = [i for i in url_comments if i != url]
+                        url_tuples_list.append((quality, url, name))
+                        continue
                     # 第一条是注释，新的是非注释 → 解开第一条，删除新行
                     if first_info['is_comment'] and not is_comment:
                         old_line = output_lines[first_info['output_idx']]

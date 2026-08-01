@@ -49,3 +49,25 @@ def split_url_line(line: str, default_quality: str):
     if quality not in ("原画", "蓝光", "超清", "高清", "标清", "流畅"):
         quality = '原画'
     return quality, url, name, has_priority
+
+
+def dedup_priority_action(has_priority: bool, is_comment: bool,
+                          kept_is_comment: bool, kept_is_priority: bool):
+    """URL 去重时优先标记的处理动作。
+
+    注释行上的标记是「暂停标注」：永远保留（不因去重丢失），但绝不激活。
+    生效行上的标记才决定是否优先轮询。
+
+    返回：
+      'merge'                 —— 把标记合并进保留行（保留注释标注，或生效行去重保护）
+      'keep_comment'          —— 生效行 + 带标记注释行：保留注释标注，不合并、不激活
+      'keep_comment_and_active' —— 带标记注释行 + 无标记生效行：两者都保留，不激活
+      None                    —— 无标记相关处理（走常规去重/解开逻辑）
+    """
+    if has_priority and not kept_is_priority:
+        if kept_is_comment or not is_comment:
+            return 'merge'
+        return 'keep_comment'
+    if kept_is_priority and kept_is_comment and not is_comment and not has_priority:
+        return 'keep_comment_and_active'
+    return None
