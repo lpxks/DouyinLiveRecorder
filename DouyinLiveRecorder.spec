@@ -33,7 +33,6 @@ a = Analysis(
     hiddenimports=[
         'src',
         'src.spider',
-        'src.stream',
         'src.utils',
         'src.logger',
         'src.proxy',
