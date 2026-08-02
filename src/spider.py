@@ -12,7 +12,6 @@ Function: Get live stream data.
 import urllib.parse
 import urllib.error
 import httpx
-import ssl
 import re
 import json
 from .utils import logger, trace_error_decorator
@@ -20,9 +19,6 @@ from .http_clients.async_http import async_req
 import streamget
 
 
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE
 OptionalStr = str | None
 
 

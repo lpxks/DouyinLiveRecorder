@@ -18,28 +18,18 @@ if _i18n_dir.exists():
             _dest = str(_f.parent.relative_to(Path.cwd()))
             _i18n_datas.append((str(_f), _dest))
 
-# Collect JavaScript files for execjs (anti-crawler signing)
-_js_datas = []
-_js_dir = Path.cwd() / 'src' / 'javascript'
-if _js_dir.exists():
-    for _f in _js_dir.rglob('*.js'):
-        _dest = str(_f.parent.relative_to(Path.cwd()))
-        _js_datas.append((str(_f), _dest))
-
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     # streamget 运行时读取包内 js 签名脚本, PyInstaller 不会自动收集 .js 数据文件
-    datas=_i18n_datas + _js_datas + collect_data_files('streamget'),
+    datas=_i18n_datas + collect_data_files('streamget'),
     hiddenimports=[
         'src',
         'src.spider',
         'src.utils',
         'src.logger',
         'src.proxy',
-        'src.room',
-        'src.ab_sign',
         'src.initializer',
         'src.http_clients',
         'src.http_clients.async_http',
