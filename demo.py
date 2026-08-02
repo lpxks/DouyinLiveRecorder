@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# 注: 平台函数内部已改用 streamget 库实现(spider.py 包装调用), 返回统一风格 dict;
+#     本表的平台名与函数映射不随重构调整。
 import asyncio
 from src.logger import logger
 from src import spider

@@ -7,6 +7,7 @@ Uses one-directory mode for compatibility with execjs + bundled data files.
 
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 # Collect i18n locale files
 _i18n_datas = []
@@ -29,7 +30,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=_i18n_datas + _js_datas,
+    # streamget 运行时读取包内 js 签名脚本, PyInstaller 不会自动收集 .js 数据文件
+    datas=_i18n_datas + _js_datas + collect_data_files('streamget'),
     hiddenimports=[
         'src',
         'src.spider',
@@ -53,6 +55,8 @@ a = Analysis(
         'tqdm',
         'configparser',
         'requests',
+        'streamget',
+        'deprecated',
     ],
     hookspath=[],
     hooksconfig={},
