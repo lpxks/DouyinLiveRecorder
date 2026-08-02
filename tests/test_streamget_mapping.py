@@ -105,6 +105,22 @@ class StreamgetMappingTest(unittest.TestCase):
             for p in expected:
                 self.assertIn(p, params, f"{cls_name} 构造缺少参数 {p}")
 
+    def test_wrapper_fetch_methods_exist(self):
+        """spider.py 包装函数调用的 fetch_* 方法必须在映射类上真实存在。"""
+        import ast
+        from pathlib import Path
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "src/spider.py").read_text(encoding="utf-8"))
+        func_nodes = {n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}
+        for func, cls_name in MAPPING.items():
+            node = func_nodes.get(func)
+            self.assertIsNotNone(node, f"spider.py 中找不到 {func}")
+            cls = getattr(streamget, cls_name)
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
+                        and sub.func.attr.startswith("fetch_"):
+                    self.assertTrue(hasattr(cls, sub.func.attr),
+                                    f"{func} 调用了 {cls_name} 上不存在的方法 {sub.func.attr}")
+
 
 if __name__ == "__main__":
     unittest.main()

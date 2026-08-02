@@ -161,7 +161,7 @@ async def get_bilibili_stream_data(url, qn='10000', platform='web', proxy_addr=N
 async def get_xhs_stream_url(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
     try:
         live_stream = streamget.RedNoteLiveStream(proxy_addr=proxy_addr, cookies=cookies)
-        json_data = await live_stream.fetch_web_stream_data(url)
+        json_data = await live_stream.fetch_app_stream_data(url)
         return _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
     except Exception as e:
         logger.error(f"get_xhs_stream_url failed: {url}, {type(e).__name__}: {e}")
