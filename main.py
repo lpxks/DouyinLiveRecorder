@@ -385,10 +385,11 @@ def clear_record_info(record_name: str, record_url: str) -> None:
         color_obj.print_colored(f"[{record_name}]已经从录制列表中移除\n", color_obj.YELLOW)
 
 
-def direct_download_stream(source_url: str, save_path: str, record_name: str, live_url: str, platform: str) -> bool:
+def direct_download_stream(source_url: str, save_path: str, record_name: str, live_url: str, platform: str,
+                           proxy_addr: str | None = None) -> bool:
     try:
         with open(save_path, 'wb') as f:
-            client = httpx.Client(timeout=None)
+            client = httpx.Client(timeout=None, proxy=proxy_addr)
 
             headers = {}
             header_params = get_record_headers(platform, live_url)
@@ -397,7 +398,8 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
                 headers[key] = value
 
             with client.stream('GET', source_url, headers=headers, follow_redirects=True) as response:
-                if response.status_code != 200:
+                # 接受 2xx 状态码(200/201/206 等, 服务端可能返回分段响应)
+                if not (200 <= response.status_code < 300):
                     logger.error(f"请求直播流失败，状态码: {response.status_code}")
                     return False
 
@@ -1329,7 +1331,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             recording_time_list[record_name] = [start_record_time, record_quality_zh]
 
                                             download_success = direct_download_stream(
-                                                flv_url, save_file_path, record_name, record_url, platform
+                                                flv_url, save_file_path, record_name, record_url, platform,
+                                                proxy_address
                                             )
 
                                             if download_success:
