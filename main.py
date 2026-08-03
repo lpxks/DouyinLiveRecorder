@@ -63,6 +63,7 @@ create_var = locals()
 first_start = True
 exit_recording = False
 need_update_line_list = []
+FFMPEG_VERSION_MAJOR = 0
 first_run = True
 not_record_list = []
 start_display_time = datetime.datetime.now()
@@ -1184,7 +1185,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-thread_queue_size", "1024",
                                     "-analyzeduration", analyzeduration,
                                     "-probesize", probesize,
-                                    "-fflags", "+discardcorrupt",
+                                    "-fflags", "+discardcorrupt+igndts",
                                     "-re", "-i", real_url,
                                     "-bufsize", bufsize,
                                     "-sn", "-dn",
@@ -1192,8 +1193,15 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-reconnect_streamed", "-reconnect_at_eof",
                                     "-max_muxing_queue_size", max_muxing_queue_size,
                                     "-correct_ts_overflow", "1",
-                                    "-avoid_negative_ts", "1"
+                                    "-avoid_negative_ts", "1",
+                                    "-flush_packets", "1"
                                 ]
+
+                                # FFmpeg 8 严格模式会拒绝容器与扩展名不匹配的 HLS 段(chzzk 平台特有),
+                                # 老版本不认识该参数, 按版本条件启用
+                                if platform == 'CHZZK' and FFMPEG_VERSION_MAJOR >= 8:
+                                    idx = ffmpeg_command.index("-re")
+                                    ffmpeg_command[idx:idx] = ["-extension_picky", "0"]
 
                                 headers = get_record_headers(platform, record_url)
                                 if headers:
@@ -1702,6 +1710,7 @@ def backup_file_start() -> None:
 
 
 def check_ffmpeg_existence() -> bool:
+    global FFMPEG_VERSION_MAJOR
     try:
         result = subprocess.run(['ffmpeg', '-version'], check=True, capture_output=True, text=True)
         if result.returncode == 0:
@@ -1710,6 +1719,9 @@ def check_ffmpeg_existence() -> bool:
             built_line = lines[1]
             print(version_line)
             print(built_line)
+            match = re.search(r'ffmpeg version (\d+)', version_line)
+            if match:
+                FFMPEG_VERSION_MAJOR = int(match.group(1))
     except subprocess.CalledProcessError as e:
         logger.error(e)
     except FileNotFoundError:
