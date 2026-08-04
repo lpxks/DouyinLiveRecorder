@@ -168,3 +168,5 @@ cython_debug/
 backup_config/
 
 StreamCap/
+
+streamget/
