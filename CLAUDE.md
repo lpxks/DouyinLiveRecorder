@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Complementary agent guidance lives in `AGENTS.md` (repo root): commit/PR conventions and coding style.
+
 ## Commands
 
 ```bash
@@ -25,7 +27,11 @@ docker-compose stop            # Stop
 docker build -t douyin-live-recorder:latest .
 ```
 
-There is no test suite, linter, or formatter configured. Python 3.10+ is required (per `pyproject.toml`).
+No linter or formatter is configured. Python 3.10+ is required (per `pyproject.toml`).
+
+### Testing
+
+Tests are stdlib `unittest` (no test dependencies) under `tests/`. Run all with `uv run python -m unittest discover -s tests`; individual files are also directly runnable (`uv run python tests/test_url_parser.py`). Note: `tests/test_read_config_value.py` never imports `main.py` — it extracts the real `read_config_value` function source via AST and execs it in a bare namespace, so keep that function free of module-level side effects if you refactor it.
 
 ## Architecture
 
@@ -46,7 +52,11 @@ Note: `StreamCap/` in the repo root is a git-ignored copy of the sibling StreamC
 
 ### Key modules
 
-**`main.py`** (~2170 lines) — The orchestration hub. Loads `config/config.ini` and `config/URL_config.ini`, then enters a `start_record()` loop per URL on a thread. Handles: URL parsing (platform detection by domain + `if/elif` chain against `platform_host`/`overseas_platform_host` lists), FFmpeg subprocess lifecycle, video post-processing (TS→MP4 conversion, H264 re-encoding, segmenting, subtitle generation), dynamic request throttling based on error rate, and message push routing. Config is read via `read_config_value()` which auto-creates missing sections/options with defaults.
+**`main.py`** (~2280 lines) — The orchestration hub. Loads `config/config.ini` and `config/URL_config.ini`, then enters a `start_record()` loop per URL on a thread. Handles: URL parsing (platform detection by domain + `if/elif` chain against `platform_host`/`overseas_platform_host` lists), FFmpeg subprocess lifecycle, video post-processing (TS→MP4 conversion, H264 re-encoding, segmenting, subtitle generation), dynamic request throttling based on error rate, and message push routing. Config is read via `read_config_value()` which auto-creates missing sections/options with defaults.
+
+**`url_parser.py`** (~90 lines) — `URL_config.ini` line parsing. `split_url_line()` splits a line into (quality, url, name, has_priority), stripping the `,优先: 是` marker BEFORE field splitting so its comma can't break alignment; `dedup_priority_action()` decides how the priority marker survives URL dedup (a marker on a commented line is a "pause annotation" — kept, never activated); `find_writeback_index()` locates the active (non-comment) line for anchor-name writeback, falling back to the annotation comment only when no active line matches.
+
+**`retry.py`** — `retry_delay(retry_index)` returns the randomized wait before a stream-interruption retry: 2–5s for retries 0–4, 5–8s for retries 5–9 (retry count capped by the `直播断流重试次数` config).
 
 **`src/spider.py`** (~3394 lines) — Platform-specific API clients. Each platform gets one or more async functions (e.g., `get_douyin_app_stream_data`, `get_tiktok_stream_data`). They call platform APIs, handle anti-crawler signing (a_bogus for Douyin, custom JS crypto for others), and return normalized dicts with status, stream URLs, title, and anchor name. Some platforms (SOOP, FlexTV, PopkonTV) auto-login and refresh credentials.
 
@@ -84,20 +94,21 @@ Note: `StreamCap/` in the repo root is a git-ignored copy of the sibling StreamC
 
 ### Configuration
 
-- `config/config.ini` — All settings: recording format (ts/mkv/flv/mp4), quality, save paths, proxy, segmenting, push channels, per-platform cookies, and account credentials for platforms that need login (SOOP, FlexTV, PopkonTV, TwitCasting). Missing sections/options are auto-created on first read via `read_config_value()`.
-- `config/URL_config.ini` — Live room URLs, one per line. Prefix a line with `#` to skip it. Prepending a quality label (e.g., `超清，https://...`) sets per-room quality. URLs can also specify an anchor name with a second comma (e.g., `原画，https://...，主播名`). Unknown/unrecognized URLs are auto-commented with `#`. Duplicate lines are removed automatically.
+- `config/config.ini` — All settings: recording format (ts/mkv/flv/mp4), quality, save paths, proxy, segmenting, push channels, per-platform cookies, account credentials for platforms that need login (SOOP, FlexTV, PopkonTV, TwitCasting), and `[优先监控] 优先监控轮询间隔(秒)` (default 3, floor 1) for priority-marked rooms. Missing sections/options are auto-created on first read via `read_config_value()`.
+- `config/URL_config.ini` — Live room URLs, one per line. Prefix a line with `#` to skip it. Prepending a quality label (e.g., `超清，https://...`) sets per-room quality. URLs can also specify an anchor name with a second comma (e.g., `原画，https://...，主播名`). Appending `,优先: 是` marks the room for priority polling (see Key patterns). Unknown/unrecognized URLs are auto-commented with `#`. Duplicate lines are removed automatically.
 
 ### Key patterns
 
 - **Async under sync**: Spider functions are `async` and called via `asyncio.run()` from threaded `start_record()` loops. Each recording session is a thread, and platform data fetching uses a `threading.Semaphore` to limit concurrent API calls.
 - **Dynamic throttling**: `adjust_max_request()` monitors error rate in a sliding 10-second window and adjusts the semaphore count up/down, between 1 and the configured max.
+- **Priority polling**: Rooms whose `URL_config.ini` line carries `,优先: 是` are polled every `[优先监控] 优先监控轮询间隔(秒)` seconds instead of the normal loop interval. The `priority_urls` set is rebuilt from scratch on each config parse round and swapped in atomically (`priority_urls = new_priority_urls`) so worker threads never see a half-built set. A marker on a commented line is a pause annotation: it survives dedup but never activates polling (see `dedup_priority_action`).
 - **FFmpeg subprocess**: Recording uses `subprocess.Popen` with stdin control. On Windows, sending `b'q'` to stdin gracefully stops FFmpeg; on Linux, `SIGINT`. Post-processing (segmenting, MP4 conversion) uses `subprocess.check_output`.
 - **URL comment toggling**: Adding `#` at the start of a URL line in `URL_config.ini` stops monitoring and recording for that room at the next loop iteration without removing the URL.
 - **Config auto-backup**: A daemon thread (`backup_file_start()`) checks config file MD5 hashes every 10 minutes and backs up changed files to `backup_config/`, keeping the 6 most recent copies.
 - **Platform detection**: `start_record()` uses `record_url.find(<domain>) > -1` in a long `if/elif` chain. `main.py` also maintains `platform_host` and `overseas_platform_host` lists to validate URLs during config loading — unrecognized hosts get auto-commented.
 - **Quality names**: Video quality is mapped from Chinese labels: `原画`→OD, `蓝光`→BD, `超清`→UHD, `高清`→HD, `标清`→SD, `流畅`→LD.
 - **Proxy per-platform**: The `使用代理录制的平台` config comma-separated list determines which platforms use the proxy; `start_record()` checks if the URL contains a platform name from this list before enabling the proxy.
-- **Anchor-name writeback**: When a `URL_config.ini` line has no anchor name, the recording thread reports `record_url|record_url,主播: <name>` to the global `need_update_line_list` **every fetch cycle** (no one-shot gate). The main loop consumes this list each iteration and rewrites the config line. The consumer dedups via `line_contains_anchor()` (skips when the target line already has `主播:`), so repeat reports can't duplicate. Rationale: writeback is a lost-update race with the user's editor when the config is edited while running — a one-shot report + one-shot pop would permanently lose the anchor when the editor's save clobbers the write; per-round reporting self-heals it. Pitfall: `update_file()` matches the old line by substring (`old_str in line`) and rewrites the whole file when there's no match — it now logs a `logger.warning` on no-match instead of failing silently — keep the report and consume stages decoupled and don't remove the consumer-side dedup.
+- **Anchor-name writeback**: When a `URL_config.ini` line has no anchor name, the recording thread reports `record_url|record_url,主播: <name>` to the global `need_update_line_list` (gated by `run_once` per recording session). The main loop consumes this list each iteration and rewrites the config line. The consumer dedups inline — skips when the target line already contains `主播:` (e.g. the anchor name came from an un-commented annotation line) — so repeat reports can't duplicate; keep this check if touching the consumer. When the same URL exists as both an active line and an annotation comment, writeback must target the ACTIVE line — `url_parser.find_writeback_index()` implements this, since rewriting the comment would churn the annotation every round. Rationale: writeback is a lost-update race with the user's editor when the config is edited while running — a one-shot report + one-shot pop would permanently lose the anchor when the editor's save clobbers the write; per-round reporting self-heals it. Pitfall: `update_file()` matches the old line by substring (`old_str in line`) and rewrites the whole file when there's no match — it now logs a `logger.warning` on no-match instead of failing silently — keep the report and consume stages decoupled and don't remove the consumer-side dedup.
 
 ### GitHub Actions workflows
 

@@ -2240,6 +2240,9 @@ while True:
                 i = find_writeback_index(output_lines, replace_words[0])
                 if i is not None:
                     out_line = output_lines[i]
+                    if '主播: ' in out_line:
+                        # 目标行已含主播名(来自注释标注解开或已写回), 跳过避免重复写入
+                        continue
                     if start_with:
                         output_lines[i] = start_with + out_line.replace(replace_words[0], new_word)
                     else:
