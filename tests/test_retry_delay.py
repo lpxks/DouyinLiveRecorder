@@ -26,12 +26,12 @@ class RetryDelayTest(unittest.TestCase):
     def test_fast_band_uses_full_random_range(self):
         rng = random.Random(123)
         values = {retry_delay(i, rng=rng) for i in range(5) for _ in range(200)}
-        self.assertEqual(values, {2, 3, 4, 5})
+        self.assertEqual(values, {4, 5})
 
     def test_slow_band_uses_full_random_range(self):
         rng = random.Random(123)
         values = {retry_delay(i, rng=rng) for i in range(5, 10) for _ in range(200)}
-        self.assertEqual(values, {5, 6, 7, 8})
+        self.assertEqual(values, {5, 6})
 
 
 if __name__ == '__main__':

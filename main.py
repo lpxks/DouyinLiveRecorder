@@ -1051,10 +1051,14 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         anchor_name = port_info.get("anchor_name", '')
 
                     if not port_info.get("anchor_name", ''):
-                        print(f'序号{count_variable} 网址内容获取失败,进行重试中...获取失败的地址是:{url_data}')
-                        with max_request_lock:
-                            error_count += 1
-                            error_window.append(1)
+                        if port_info.get('ended'):
+                            # 官方接口返回已下播(如抖音 prompts"直播已结束"): 走等待路径, 不重试、不计错误
+                            print(f"\r{url_data[1]} 直播已结束,等待下一次轮询...")
+                        else:
+                            print(f'序号{count_variable} 网址内容获取失败,进行重试中...获取失败的地址是:{url_data}')
+                            with max_request_lock:
+                                error_count += 1
+                                error_window.append(1)
                     else:
                         anchor_name = clean_name(anchor_name)
                         record_name = f'序号{count_variable} {anchor_name}'

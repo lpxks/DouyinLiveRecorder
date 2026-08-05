@@ -49,6 +49,24 @@ def _stream_data_to_dict(sd: streamget.StreamData) -> dict:
         "live_url": sd.live_url,
         "extra": sd.extra,
     }
+
+
+# streamget 抖音实现的固定异常文案(风控/VR/拉取失败)——这些是可重试类失败;
+# 其余异常(如官方接口 prompts"直播已结束")视为已下播, 不重试
+DOUYIN_RETRYABLE_EXCEPTION_MARKERS = ("risk control", "VR live", "Fetch")
+
+
+def _is_douyin_retryable_error(e: Exception) -> bool:
+    """抖音异常是否属于可重试类(风控/VR/拉取失败)。
+
+    streamget 对抖音官方接口返回的 prompts 字段(如"直播已结束")直接抛
+    Exception(prompts 文案), 该文案为动态中文, 不含固定重试类标记;
+    判定为已下播(ended), 由 main.py 走等待路径而非失败重试。
+    """
+    msg = str(e)
+    return any(marker in msg for marker in DOUYIN_RETRYABLE_EXCEPTION_MARKERS)
+
+
 async def get_douyin_web_stream_data(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
     try:
         live_stream = streamget.DouyinLiveStream(proxy_addr=proxy_addr, cookies=cookies)
@@ -56,7 +74,10 @@ async def get_douyin_web_stream_data(url, proxy_addr=None, cookies=None, video_q
         return _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
     except Exception as e:
         logger.error(f"get_douyin_web_stream_data failed: {url}, {type(e).__name__}: {e}")
-        return {"anchor_name": "", "is_live": False}
+        if _is_douyin_retryable_error(e):
+            return {"anchor_name": "", "is_live": False}
+        # 官方接口返回已下播(如 prompts"直播已结束"): 标记 ended, main.py 走等待路径不重试
+        return {"anchor_name": "", "is_live": False, "ended": True}
 
 @trace_error_decorator
 async def get_douyin_app_stream_data(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
@@ -72,7 +93,10 @@ async def get_douyin_app_stream_data(url, proxy_addr=None, cookies=None, video_q
             return _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
         except Exception as e:
             logger.error(f"get_douyin_app_stream_data failed: {url}, {type(e).__name__}: {e}")
-            return {"anchor_name": "", "is_live": False}
+            if _is_douyin_retryable_error(e):
+                return {"anchor_name": "", "is_live": False}
+            # 官方接口返回已下播: 标记 ended, 不重试
+            return {"anchor_name": "", "is_live": False, "ended": True}
 
 @trace_error_decorator
 async def get_tiktok_stream_data(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
