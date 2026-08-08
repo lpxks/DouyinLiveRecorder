@@ -191,6 +191,51 @@ def get_startup_info(system_type: str):
     return startup_info
 
 
+def input_with_timeout(prompt: str, timeout: int = 120) -> str:
+    """带超时的控制台输入: 超时未输入返回空串, 不会无限阻塞。
+
+    URL_config.ini 为空时用它替代 input(): 用户可直接编辑该文件添加直播间,
+    程序下轮循环自动检测生效; 无有效 stdin 的环境(打包后从 GUI 启动等)
+    也不会因 EOFError 崩溃。
+    """
+    print(prompt, end='', flush=True)
+    if os.name == 'nt':
+        import msvcrt
+        buf = ''
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch == '\r':      # 回车结束
+                    print()
+                    return buf
+                if ch == '\x03':    # Ctrl+C
+                    raise KeyboardInterrupt
+                if ch == '\b':      # 退格
+                    if buf:
+                        buf = buf[:-1]
+                        print('\b \b', end='', flush=True)
+                    continue
+                if ch == '\xe0':    # 方向键等扩展键, 吞掉后续字节
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                    continue
+                buf += ch
+                print(ch, end='', flush=True)
+            time.sleep(0.05)
+        print()
+        return ''
+    # POSIX: select 轮询 stdin, 超时/EOF 均安全返回
+    import select
+    print()
+    if select.select([sys.stdin], [], [], timeout)[0]:
+        try:
+            return sys.stdin.readline().rstrip('\n')
+        except (EOFError, OSError):
+            return ''
+    return ''
+
+
 def segment_video(converts_file_path: str, segment_save_file_path: str, segment_format: str, segment_time: str,
                   is_original_delete: bool = True) -> None:
     try:
@@ -1869,10 +1914,16 @@ while True:
                 ini_URL_content = file.read().strip()
 
         if not ini_URL_content.strip():
-            input_url = input('请输入要录制的主播直播间网址（尽量使用PC网页端的直播间地址）:\n')
-            with open(url_config_file, 'w', encoding=text_encoding) as file:
-                file.write(input_url)
-    except OSError as err:
+            color_obj.print_colored(
+                f"检测到 {url_config_file} 为空: 可在此输入直播间网址后回车, 或直接编辑该文件添加, 程序会自动检测生效",
+                color_obj.YELLOW)
+            input_url = input_with_timeout(
+                '请输入要录制的主播直播间网址（尽量使用PC网页端的直播间地址）:\n',
+                timeout=120)
+            if input_url.strip():
+                with open(url_config_file, 'w', encoding=text_encoding) as file:
+                    file.write(input_url)
+    except (OSError, EOFError) as err:
         logger.error(f"发生 I/O 错误: {err}")
 
     video_save_path = read_config_value(config, '录制设置', '直播保存路径(不填则默认)', "")
