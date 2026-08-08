@@ -144,5 +144,64 @@ class ProxyIntegrationTest(unittest.TestCase):
             proxy.close()
 
 
+class ProxyResilienceTest(unittest.TestCase):
+    """F1: 上游异常/不可用后, 代理 accept 循环存活, 上游恢复后重连成功。"""
+
+    def test_proxy_recovers_after_upstream_unavailable(self):
+        # 拿一个空闲端口(先绑定获取再释放)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        proxy = FLVProxy(f"http://127.0.0.1:{port}/stream.flv")
+        proxy.start()
+        try:
+            # 阶段 1: 上游不可用(端口未监听) → 连接被代理关闭, 但 accept 循环存活
+            c1 = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
+            c1.sendall(b"GET /stream.flv HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            data1 = c1.recv(4096)
+            c1.close()
+            self.assertEqual(data1, b"", "上游不可用时不应有响应数据")
+
+            # 阶段 2: 同一端口起 FLV 源(模拟上游恢复)
+            class FlvSource(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/x-flv")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(make_flv_stream())
+                        self.wfile.flush()
+                        time.sleep(5)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+
+                def log_message(self, *args):
+                    pass
+
+            source = http.server.ThreadingHTTPServer(("127.0.0.1", port), FlvSource)
+            source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+            source_thread.start()
+            try:
+                # 阶段 3: 新连接由新线程服务, 成功重连上游并收到 FLV 数据
+                c2 = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
+                c2.sendall(b"GET /stream.flv HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                received = b""
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    chunk = c2.recv(65536)
+                    if not chunk:
+                        break
+                    received += chunk
+                c2.close()
+                self.assertIn(b"HTTP/1.1 200 OK", received[:64])
+                self.assertIn(b"FLV", received[64:])
+            finally:
+                source.shutdown()
+        finally:
+            proxy.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,45 +109,54 @@ class FLVProxy:
                 conn, _ = self._server.accept()
             except OSError:
                 return
-            try:
-                self._handle_client(conn)
-            finally:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
+            # 每连接独立线程: 单个连接卡死/异常不影响 accept 循环,
+            # ffmpeg 重连后始终有线程可服务(参考 bililive-go 的连接处理)
+            threading.Thread(target=self._handle_client, args=(conn,), daemon=True,
+                             name="flv-proxy-conn").start()
 
     def _handle_client(self, client_conn: socket.socket) -> None:
-        # 读 ffmpeg 的 HTTP 请求头(直到空行)
-        request = b""
-        while b"\r\n\r\n" not in request:
-            chunk = client_conn.recv(4096)
-            if not chunk:
-                return
-            request += chunk
-            if len(request) > 65536:
-                return
-
         try:
-            with httpx.Client(proxy=self.proxy_addr, timeout=None, verify=False,
-                              follow_redirects=True) as client:
-                with client.stream("GET", self.upstream_url, headers=self.headers) as resp:
-                    if resp.status_code >= 300:
-                        return
-                    # 回 200 响应头给 ffmpeg
-                    client_conn.sendall(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: video/x-flv\r\n"
-                        b"Cache-Control: no-cache\r\n\r\n")
-                    with self._lock:
-                        self._client_conn = client_conn
-                    src = _BufferedStream(resp.iter_bytes())
-                    try:
-                        self._parse_and_forward(src, client_conn)
-                    except SegmentRequired:
-                        # 关键帧处触发分段: 关闭到 ffmpeg 的连接, 让其读到 EOF 收尾
-                        self._force_close_client()
-        except OSError:
-            pass
+            # 读 ffmpeg 的 HTTP 请求头(直到空行)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = client_conn.recv(4096)
+                if not chunk:
+                    return
+                request += chunk
+                if len(request) > 65536:
+                    return
+
+            try:
+                # 读超时 60s: 上游停滞(断流但连接保持)时线程退出清理,
+                # 后续 ffmpeg 重连由新线程重新连上游恢复;
+                # trust_env=False: 只走显式 proxy_addr, 不受系统 HTTP_PROXY 环境变量劫持
+                with httpx.Client(proxy=self.proxy_addr,
+                                  timeout=httpx.Timeout(connect=15, read=60, write=None, pool=None),
+                                  trust_env=False, verify=False, follow_redirects=True) as client:
+                    with client.stream("GET", self.upstream_url, headers=self.headers) as resp:
+                        if resp.status_code >= 300:
+                            return
+                        # 回 200 响应头给 ffmpeg
+                        client_conn.sendall(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: video/x-flv\r\n"
+                            b"Cache-Control: no-cache\r\n\r\n")
+                        with self._lock:
+                            self._client_conn = client_conn
+                        src = _BufferedStream(resp.iter_bytes())
+                        try:
+                            self._parse_and_forward(src, client_conn)
+                        except SegmentRequired:
+                            # 关键帧处触发分段: 关闭到 ffmpeg 的连接, 让其读到 EOF 收尾
+                            self._force_close_client()
+            except Exception:
+                # httpx 传输异常(ReadError/ConnectError/RemoteProtocolError 等
+                # 均非 OSError 子类), 上游断流/拒绝时线程正常退出
+                pass
+        finally:
+            try:
+                client_conn.close()
+            except OSError:
+                pass
 
     def _force_close_client(self) -> None:
         with self._lock:

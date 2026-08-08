@@ -1162,6 +1162,11 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 # FLV 流代理: 检测 SPS/PPS 变化(分辨率/编码参数切换)自动分段,
                                 # 在关键帧处断连让 ffmpeg 收尾当前文件, 由断流重试机制重开新文件
                                 # (参考 bililive-go flvproxy, 对 ffmpeg 完全透明)
+                                if flv_proxy is not None and flv_proxy.upstream_url != real_url:
+                                    # 流地址已变化(如下播重开播/CDN 轮换): 重建代理指向新地址,
+                                    # 否则代理会一直用过期 URL 请求, 新直播永远录不上
+                                    flv_proxy.close()
+                                    flv_proxy = None
                                 if flv_proxy is None and FLVProxy.is_flv_stream(real_url):
                                     proxy_header_str = get_record_headers(platform, record_url)
                                     proxy_headers = {}
