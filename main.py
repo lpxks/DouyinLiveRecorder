@@ -1151,6 +1151,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 except Exception as e:
                                     logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
 
+                                only_flv_record = False
+                                only_flv_platform_list = ['shopee', '花椒直播']
+                                if platform in only_flv_platform_list:
+                                    logger.debug(f"提示: {platform} 将强制使用FLV格式录制")
+                                    only_flv_record = True
+
                                 if platform != '自定义录制直播':
                                     if enable_https_recording and real_url.startswith("http://"):
                                         real_url = real_url.replace("http://", "https://")
@@ -1167,7 +1173,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     # 否则代理会一直用过期 URL 请求, 新直播永远录不上
                                     flv_proxy.close()
                                     flv_proxy = None
-                                if flv_proxy is None and FLVProxy.is_flv_stream(real_url):
+                                if flv_proxy is None and FLVProxy.is_flv_stream(real_url) \
+                                        and not only_flv_record:
+                                    # 直录平台(shopee/花椒)不用 ffmpeg, 走 port_info 的 flv_url
+                                    # 直接下载, 代理从无客户端上连 → 不创建, 避免僵尸 socket+线程
                                     proxy_header_str = get_record_headers(platform, record_url)
                                     proxy_headers = {}
                                     if proxy_header_str:
@@ -1255,12 +1264,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     else:
                                         logger.info(
                                             f"{platform} | {anchor_name} | 直播源地址: {real_url}")
-
-                                only_flv_record = False
-                                only_flv_platform_list = ['shopee', '花椒直播']
-                                if platform in only_flv_platform_list:
-                                    logger.debug(f"提示: {platform} 将强制使用FLV格式录制")
-                                    only_flv_record = True
 
                                 only_audio_record = False
                                 only_audio_platform_list = ['猫耳FM直播', 'Look直播']
