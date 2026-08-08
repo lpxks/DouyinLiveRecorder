@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure release exists
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -63,9 +63,9 @@ jobs:
       (github.event_name == 'push' || inputs.build_windows_x64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           architecture: 'x64'
@@ -124,14 +124,14 @@ jobs:
           # Package
           Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DouyinLiveRecorder_Windows_x64
           path: DouyinLiveRecorder_Windows_x64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: DouyinLiveRecorder_Windows_x64.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
@@ -147,9 +147,9 @@ jobs:
       (github.event_name == 'push' || inputs.build_windows_x86)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           architecture: 'x86'
@@ -216,14 +216,14 @@ jobs:
 
           Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_x86.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DouyinLiveRecorder_Windows_x86
           path: DouyinLiveRecorder_Windows_x86.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: DouyinLiveRecorder_Windows_x86.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
@@ -239,9 +239,9 @@ jobs:
       (github.event_name == 'push' || inputs.build_windows_arm64)
     runs-on: windows-11-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           architecture: 'arm64'
@@ -321,14 +321,14 @@ jobs:
 
           Compress-Archive -Path "$dist/*" -DestinationPath DouyinLiveRecorder_Windows_arm64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DouyinLiveRecorder_Windows_arm64
           path: DouyinLiveRecorder_Windows_arm64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: DouyinLiveRecorder_Windows_arm64.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
@@ -344,9 +344,9 @@ jobs:
       (github.event_name == 'push' || inputs.build_macos_x64)
     runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -426,14 +426,14 @@ jobs:
           cd dist
           zip -r "$GITHUB_WORKSPACE/DouyinLiveRecorder_macOS_x64.zip" DouyinLiveRecorder/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DouyinLiveRecorder_macOS_x64
           path: DouyinLiveRecorder_macOS_x64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: DouyinLiveRecorder_macOS_x64.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
@@ -449,9 +449,9 @@ jobs:
       (github.event_name == 'push' || inputs.build_macos_arm64)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -528,14 +528,14 @@ jobs:
           cd dist
           zip -r "$GITHUB_WORKSPACE/DouyinLiveRecorder_macOS_arm64.zip" DouyinLiveRecorder/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DouyinLiveRecorder_macOS_arm64
           path: DouyinLiveRecorder_macOS_arm64.zip
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: DouyinLiveRecorder_macOS_arm64.zip
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
