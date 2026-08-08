@@ -28,6 +28,7 @@ from typing import Any
 import configparser
 import httpx
 from src import spider
+from src.flv_proxy import FLVProxy
 from src.proxy import ProxyDetector
 from src.utils import logger
 from src import utils
@@ -550,6 +551,8 @@ def select_source_url(link, stream_info):
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
+
+    flv_proxy = None  # FLV 流代理(检测分辨率/编码参数变化自动分段), 跨轮复用
 
     while True:
         try:
@@ -1156,6 +1159,21 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     if platform in http_record_list:
                                         real_url = real_url.replace("https://", "http://")
 
+                                # FLV 流代理: 检测 SPS/PPS 变化(分辨率/编码参数切换)自动分段,
+                                # 在关键帧处断连让 ffmpeg 收尾当前文件, 由断流重试机制重开新文件
+                                # (参考 bililive-go flvproxy, 对 ffmpeg 完全透明)
+                                if flv_proxy is None and FLVProxy.is_flv_stream(real_url):
+                                    proxy_header_str = get_record_headers(platform, record_url)
+                                    proxy_headers = {}
+                                    if proxy_header_str:
+                                        k, v = proxy_header_str.split(":", 1)
+                                        proxy_headers[k.strip()] = v.strip()
+                                    flv_proxy = FLVProxy(real_url, headers=proxy_headers,
+                                                         proxy_addr=proxy_address)
+                                    flv_proxy.start()
+                                if flv_proxy is not None:
+                                    real_url = flv_proxy.local_url
+
                                 user_agent = ("Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 ("
                                               "KHTML, like Gecko) SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile "
                                               "Safari/537.36")
@@ -1307,6 +1325,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1401,6 +1422,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1475,6 +1499,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1522,6 +1549,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1570,6 +1600,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                                 ).start()
                                                             except subprocess.CalledProcessError as e:
                                                                 logger.error(f"转码失败: {e} ")
+                                                if flv_proxy:
+                                                    flv_proxy.close()
+                                                    flv_proxy = None
                                                 return
 
                                         except subprocess.CalledProcessError as e:
@@ -1605,6 +1638,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 threading.Thread(
                                                     target=converts_mp4, args=(save_file_path, delete_origin_file)
                                                 ).start()
+                                                if flv_proxy:
+                                                    flv_proxy.close()
+                                                    flv_proxy = None
                                                 return
 
                                         except subprocess.CalledProcessError as e:
