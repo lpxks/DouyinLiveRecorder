@@ -33,12 +33,12 @@ def make_video_tag(frame_type: int, codec_id: int, avc_packet_type: int,
 
 
 def make_flv_stream() -> bytes:
-    """构造合成 FLV 流: 头 + 第一个 SPS + 普通帧 + 第二个 SPS + 关键帧。"""
+    """构造合成 FLV 流: 头 + 第一个 SPS + 普通帧 + 内容不同的第二个 SPS + 关键帧。"""
     header = b"FLV" + bytes([1, 0x05, 0, 0, 0, 9])
-    tags = (make_video_tag(KEYFRAME, AVC, SEQ_HEADER)   # 第一个 SPS/PPS
-            + make_video_tag(INTERFRAME, AVC, NALU)     # 普通帧
-            + make_video_tag(KEYFRAME, AVC, SEQ_HEADER)  # 第二个 SPS/PPS(参数变化!)
-            + make_video_tag(KEYFRAME, AVC, NALU))      # 关键帧 → 应触发分段
+    tags = (make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)  # 第一个 SPS/PPS
+            + make_video_tag(INTERFRAME, AVC, NALU)                          # 普通帧
+            + make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)  # 第二个 SPS(参数变化!)
+            + make_video_tag(KEYFRAME, AVC, NALU))                           # 关键帧 → 应触发分段
     return header + tags
 
 
@@ -55,25 +55,51 @@ class VideoTagStateTest(unittest.TestCase):
         self.assertEqual(self.proxy._avc_header_count, 1)
         self.assertFalse(self.proxy._pending_segment)
 
-    def test_second_seq_header_marks_pending(self):
-        for tag in (make_video_tag(KEYFRAME, AVC, SEQ_HEADER),
-                    make_video_tag(KEYFRAME, AVC, SEQ_HEADER)):
+    def test_second_seq_header_with_different_content_marks_pending(self):
+        """第二个且内容不同的 SPS/PPS(参数确实变化)才标记分段。"""
+        for tag in (make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8),
+                    make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)):
             self.proxy._check_video_tag(tag[15:])
         self.assertEqual(self.proxy._avc_header_count, 2)
         self.assertTrue(self.proxy._pending_segment)
 
+    def test_identical_seq_header_repeat_not_trigger(self):
+        """内容相同的 SPS/PPS 重发(CDN 周期性重发)不视为参数变化。"""
+        for _ in range(3):
+            self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER)[15:])
+        self.assertEqual(self.proxy._avc_header_count, 3)
+        self.assertFalse(self.proxy._pending_segment)
+
+    def test_video_info_frame_not_counted(self):
+        """VideoInfoFrame(frameType=5)不作为 sequence header 计数。"""
+        self.proxy._check_video_tag(make_video_tag(5, AVC, SEQ_HEADER)[15:])  # VideoInfoFrame
+        self.assertEqual(self.proxy._avc_header_count, 0)
+        self.assertFalse(self.proxy._pending_segment)
+
     def test_keyframe_after_second_seq_header_triggers(self):
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER)[15:])
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)[15:])
         with self.assertRaises(SegmentRequired):
             self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, NALU)[15:])
         # 触发后标志复位
         self.assertFalse(self.proxy._pending_segment)
 
+    def test_min_segment_interval_blocks_rapid_segments(self):
+        """节流: 距上次分段不足 min_segment_interval 时, 不触发(保留标记延迟分段)。"""
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)[15:])
+        # 第一次触发(记录 _last_segment_at)
+        with self.assertRaises(SegmentRequired):
+            self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, NALU)[15:])
+        # 再次标记 + 关键帧, 间隔不足 → 不触发, 标记保留
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x03" * 8)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, NALU)[15:])  # 不应抛
+        self.assertTrue(self.proxy._pending_segment)
+
     def test_interframe_does_not_trigger(self):
         """标记后非关键帧不触发。"""
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER)[15:])
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)[15:])
         self.proxy._check_video_tag(make_video_tag(INTERFRAME, AVC, NALU)[15:])  # 不应抛
         self.assertTrue(self.proxy._pending_segment)
 

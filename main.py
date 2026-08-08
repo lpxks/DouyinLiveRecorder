@@ -1235,7 +1235,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     ffmpeg_command.insert(11, "-headers")
                                     ffmpeg_command.insert(12, headers)
 
-                                if proxy_address:
+                                if proxy_address and flv_proxy is None:
+                                    # 走 FLV 代理时不传 -http_proxy: -i 已是本地 127.0.0.1,
+                                    # 传给代理会把 loopback 也路由进用户代理导致录制失败
+                                    # (上游连接由代理自身的 proxy_addr 负责)
                                     ffmpeg_command.insert(1, "-http_proxy")
                                     ffmpeg_command.insert(2, proxy_address)
 

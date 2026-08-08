@@ -14,6 +14,14 @@ import time
 
 import httpx
 
+from .utils import logger
+
+# 与 ffmpeg 直连路径一致的移动端 UA(代理转发给上游, 避免 CDN 识别为 python-httpx)
+FFMPEG_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36"
+)
+
 
 class SegmentRequired(Exception):
     """分段条件触发(新 SPS/PPS 之后遇到关键帧)。"""
@@ -74,6 +82,7 @@ class FLVProxy:
 
         self._lock = threading.Lock()
         self._avc_header_count = 0
+        self._first_sps: bytes | None = None  # 首个 SPS/PPS body, 用于比对参数是否真的变化
         self._pending_segment = False
         self._last_segment_at = 0.0
         self._client_conn = None  # 到 ffmpeg 的连接, 用于强制断连
@@ -130,10 +139,16 @@ class FLVProxy:
                 # 读超时 60s: 上游停滞(断流但连接保持)时线程退出清理,
                 # 后续 ffmpeg 重连由新线程重新连上游恢复;
                 # trust_env=False: 只走显式 proxy_addr, 不受系统 HTTP_PROXY 环境变量劫持
-                with httpx.Client(proxy=self.proxy_addr,
+                proxy_addr = self.proxy_addr
+                if proxy_addr and not proxy_addr.startswith('http'):
+                    proxy_addr = 'http://' + proxy_addr  # 补 scheme(与 utils.handle_proxy_addr 一致)
+                upstream_headers = dict(self.headers)
+                upstream_headers.setdefault('User-Agent', FFMPEG_USER_AGENT)
+                with httpx.Client(proxy=proxy_addr,
                                   timeout=httpx.Timeout(connect=15, read=60, write=None, pool=None),
                                   trust_env=False, verify=False, follow_redirects=True) as client:
-                    with client.stream("GET", self.upstream_url, headers=self.headers) as resp:
+                    with client.stream("GET", self.upstream_url,
+                                       headers=upstream_headers) as resp:
                         if resp.status_code >= 300:
                             return
                         # 回 200 响应头给 ffmpeg
@@ -148,10 +163,10 @@ class FLVProxy:
                         except SegmentRequired:
                             # 关键帧处触发分段: 关闭到 ffmpeg 的连接, 让其读到 EOF 收尾
                             self._force_close_client()
-            except Exception:
+            except Exception as e:
                 # httpx 传输异常(ReadError/ConnectError/RemoteProtocolError 等
-                # 均非 OSError 子类), 上游断流/拒绝时线程正常退出
-                pass
+                # 均非 OSError 子类), 上游断流/拒绝时线程正常退出; 记录日志便于排查
+                logger.warning(f"flv_proxy upstream error: {type(e).__name__}: {e}")
         finally:
             try:
                 client_conn.close()
@@ -174,6 +189,7 @@ class FLVProxy:
         # 每个新连接(新文件)重置计数
         with self._lock:
             self._avc_header_count = 0
+            self._first_sps = None
             self._pending_segment = False
 
         header = src.read(self.FLV_HEADER_SIZE)
@@ -216,17 +232,23 @@ class FLVProxy:
             return
         avc_packet_type = data[1]
 
-        if avc_packet_type == self.AVC_SEQ_HEADER:  # SPS/PPS
+        # 只对关键帧标记的 sequence header 计数(VideoInfoFrame 等 frameType!=1 不计入),
+        # 且比对 SPS/PPS 内容: 参数确实变化才标记分段, 相同内容的重发不触发
+        if avc_packet_type == self.AVC_SEQ_HEADER and frame_type == self.KEYFRAME_FRAME_TYPE:
             with self._lock:
                 self._avc_header_count += 1
-                count = self._avc_header_count
-            if count > 1:
-                # 第二个 SPS/PPS = 分辨率/编码参数变化: 标记待分段, 等关键帧
-                self._pending_segment = True
+                if self._avc_header_count == 1:
+                    self._first_sps = bytes(data)
+                elif self._first_sps != data:
+                    # 第二个且内容不同的 SPS/PPS = 分辨率/编码参数变化: 标记待分段
+                    self._pending_segment = True
 
         is_keyframe = frame_type == self.KEYFRAME_FRAME_TYPE and avc_packet_type == self.AVC_NALU
         if is_keyframe and self._pending_segment:
-            self._pending_segment = False
             with self._lock:
+                if time.time() - self._last_segment_at < self.min_segment_interval:
+                    # 距上次分段过近(如 CDN 周期性重发 SPS): 保留标记, 等下个关键帧延迟分段
+                    return
                 self._last_segment_at = time.time()
+            self._pending_segment = False
             raise SegmentRequired()
