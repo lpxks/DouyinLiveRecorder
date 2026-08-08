@@ -1207,8 +1207,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-re", "-i", real_url,
                                     "-bufsize", bufsize,
                                     "-sn", "-dn",
-                                    "-reconnect_delay_max", "60",
-                                    "-reconnect_streamed", "-reconnect_at_eof",
+                                    # 走 FLV 代理时禁用 ffmpeg 内置重连: 代理在关键帧处断连期望
+                                    # ffmpeg 读到 EOF 收尾当前文件(分段); 若开启 -reconnect_at_eof,
+                                    # ffmpeg 会把 EOF 当错误重连本地代理继续写同一文件, 分段永不生效
+                                    # (直连路径保留内置重连, 断流由 ffmpeg 自身恢复)
+                                    *([] if flv_proxy else ["-reconnect_delay_max", "60",
+                                                            "-reconnect_streamed", "-reconnect_at_eof"]),
                                     "-max_muxing_queue_size", max_muxing_queue_size,
                                     "-correct_ts_overflow", "1",
                                     "-avoid_negative_ts", "1",
