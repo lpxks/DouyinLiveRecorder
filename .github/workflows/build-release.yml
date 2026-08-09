@@ -109,6 +109,11 @@ jobs:
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+          # ffprobe — 与 ffmpeg 一起打包, 供录制后分辨率变化检测使用
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          }
 
           # node — node/ dir (src/__init__.py adds ./node/ to PATH)
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
@@ -193,6 +198,11 @@ jobs:
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+          # ffprobe — 与 ffmpeg 一起打包, 供录制后分辨率变化检测使用
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          }
 
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
@@ -298,6 +308,11 @@ jobs:
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+          # ffprobe — 与 ffmpeg 一起打包, 供录制后分辨率变化检测使用
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          }
 
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
@@ -383,6 +398,11 @@ jobs:
           mkdir -p "$dist/ffmpeg"
           cp ffmpeg_static/ffmpeg "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
+          # ffprobe — 与 ffmpeg 一起打包, 供录制后分辨率变化检测使用
+          if [ -f ffmpeg_static/ffprobe ]; then
+            cp ffmpeg_static/ffprobe "$dist/ffmpeg/ffprobe"
+            chmod +x "$dist/ffmpeg/ffprobe"
+          fi
 
           # Copy the full static node tree (bin/lib/share), matching what the
           # Windows jobs bundle (npm, npx, and node's own lib/node_modules),
@@ -485,6 +505,11 @@ jobs:
           mkdir -p "$dist/ffmpeg"
           cp ffmpeg_static/ffmpeg "$dist/ffmpeg/ffmpeg"
           chmod +x "$dist/ffmpeg/ffmpeg"
+          # ffprobe — 与 ffmpeg 一起打包, 供录制后分辨率变化检测使用
+          if [ -f ffmpeg_static/ffprobe ]; then
+            cp ffmpeg_static/ffprobe "$dist/ffmpeg/ffprobe"
+            chmod +x "$dist/ffmpeg/ffprobe"
+          fi
 
           # Copy the full static node tree (bin/lib/share), matching what the
           # Windows jobs bundle (npm, npx, and node's own lib/node_modules),
