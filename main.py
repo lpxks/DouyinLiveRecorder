@@ -293,7 +293,9 @@ def check_resolution_changes(save_file_path: str, record_name: str) -> None:
     文件(直录 TS/MKV、HLS 源等), 确认每个文件内部参数是否统一。
     """
     directory, filename = os.path.split(save_file_path)
-    if '%' in filename:
+    if re.search(r'%\d+d', filename):
+        # 分段录制模板(如 xxx_%03d.ts): 扫描匹配的所有分段。
+        # 注意不能用 '%' in filename 判断——主播名/标题可能含 %(如 100%辣妹)
         prefix = filename.split('%')[0]
         for path in sorted(utils.get_file_paths(directory)):
             if os.path.basename(path).startswith(prefix):
@@ -302,7 +304,19 @@ def check_resolution_changes(save_file_path: str, record_name: str) -> None:
         _report_resolution_changes(save_file_path, record_name)
 
 
+_resolution_scanned = {}  # path -> (size, mtime): 已扫描文件记录, 分段重扫时跳过未变化的
+
+
 def _report_resolution_changes(file_path: str, record_name: str) -> None:
+    try:
+        key = (os.path.getsize(file_path), os.path.getmtime(file_path))
+    except OSError:
+        return  # 文件已不存在(如转换后删除), 跳过
+    if _resolution_scanned.get(file_path) == key:
+        return  # 该文件已扫描且未变化, 避免每次分段结束重扫全部历史分段
+    if len(_resolution_scanned) > 500:
+        _resolution_scanned.clear()  # 防无限增长, 长期运行只保留近期记录
+    _resolution_scanned[file_path] = key
     resolutions = analyze_resolution_changes(file_path)
     if len(resolutions) > 1:
         color_obj.print_colored(
@@ -630,7 +644,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             record_quality_zh, record_url, anchor_name = url_data
             record_name = f'序号{count_variable} {anchor_name}'
             record_quality = get_quality_code(record_quality_zh)
-            proxy_address = proxy_addr
+            proxy_address = proxy_addr or None  # 空串传给 httpx.Client(proxy="") 会抛 ValueError
             platform = '未知平台'
             live_domain = '/'.join(record_url.split('/')[0:3])
 
@@ -652,6 +666,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             while True:
                 if record_url in url_comments:
                     print(f"[{record_name}]已被注释,本条线程将会退出")
+                    if flv_proxy:
+                        flv_proxy.close()
+                        flv_proxy = None
                     clear_record_info(record_name, record_url)
                     return
 
@@ -1104,6 +1121,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                     else:
                         logger.error(f'{record_url} {platform}直播地址')
+                        if flv_proxy:
+                            flv_proxy.close()
+                            flv_proxy = None
                         return
 
                     if anchor_name:
@@ -1249,6 +1269,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                          proxy_addr=proxy_address)
                                     flv_proxy.start()
                                 if flv_proxy is not None:
+                                    show_real_url = real_url  # 日志用原始流地址(下方 real_url 被替换为 loopback)
                                     real_url = flv_proxy.local_url
 
                                 user_agent = ("Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 ("
@@ -1326,7 +1347,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             f"{platform} | {anchor_name} | 直播源地址: {port_info.get('m3u8_url')}")
                                     else:
                                         logger.info(
-                                            f"{platform} | {anchor_name} | 直播源地址: {real_url}")
+                                            f"{platform} | {anchor_name} | 直播源地址: "
+                                            f"{show_real_url if flv_proxy else real_url}")
 
                                 only_audio_record = False
                                 only_audio_platform_list = ['猫耳FM直播', 'Look直播']

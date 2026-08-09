@@ -136,20 +136,26 @@ class FLVProxy:
                     return
 
             try:
-                # 读超时 60s: 上游停滞(断流但连接保持)时线程退出清理,
-                # 后续 ffmpeg 重连由新线程重新连上游恢复;
+                # 客户端 socket 超时: ffmpeg 停止消费(demuxer 报错)时 sendall/recv
+                # 不再无限阻塞, 线程超时退出清理, 后续重连由新线程服务
+                client_conn.settimeout(30)
+                # 读超时 12s: 与 ffmpeg 的 -rw_timeout 15s 对齐——上游停滞时旧线程
+                # 先于 ffmpeg 退出清理上游连接, 重试的新连接不会堆积 stale GET;
                 # trust_env=False: 只走显式 proxy_addr, 不受系统 HTTP_PROXY 环境变量劫持
-                proxy_addr = self.proxy_addr
+                proxy_addr = self.proxy_addr or None  # 空串传给 httpx 会抛 ValueError
                 if proxy_addr and not proxy_addr.startswith('http'):
                     proxy_addr = 'http://' + proxy_addr  # 补 scheme(与 utils.handle_proxy_addr 一致)
                 upstream_headers = dict(self.headers)
                 upstream_headers.setdefault('User-Agent', FFMPEG_USER_AGENT)
                 with httpx.Client(proxy=proxy_addr,
-                                  timeout=httpx.Timeout(connect=15, read=60, write=None, pool=None),
+                                  timeout=httpx.Timeout(connect=15, read=12, write=None, pool=None),
                                   trust_env=False, verify=False, follow_redirects=True) as client:
                     with client.stream("GET", self.upstream_url,
                                        headers=upstream_headers) as resp:
                         if resp.status_code >= 300:
+                            # 上游拒绝(令牌过期/会话失效等): 记录日志便于排查,
+                            # 否则 EOF→重试→同 GET 静默循环无法定位
+                            logger.warning(f"flv_proxy upstream {resp.status_code}: {self.upstream_url}")
                             return
                         # 回 200 响应头给 ffmpeg
                         client_conn.sendall(
@@ -161,8 +167,10 @@ class FLVProxy:
                         try:
                             self._parse_and_forward(src, client_conn)
                         except SegmentRequired:
-                            # 关键帧处触发分段: 关闭到 ffmpeg 的连接, 让其读到 EOF 收尾
-                            self._force_close_client()
+                            # 关键帧处触发分段: 关闭到 ffmpeg 的连接, 让其读到 EOF 收尾。
+                            # 只关自己这条连接: _client_conn 单槽可能已被并发的新连接
+                            # 覆盖, 关槽会误伤活跃录制(陈旧线程恢复后强关新连接)
+                            self._force_close_client(client_conn)
             except Exception as e:
                 # httpx 传输异常(ReadError/ConnectError/RemoteProtocolError 等
                 # 均非 OSError 子类), 上游断流/拒绝时线程正常退出; 记录日志便于排查
@@ -173,10 +181,13 @@ class FLVProxy:
             except OSError:
                 pass
 
-    def _force_close_client(self) -> None:
-        with self._lock:
-            conn = self._client_conn
-            self._client_conn = None
+    def _force_close_client(self, conn: socket.socket | None = None) -> None:
+        """关闭到 ffmpeg 的连接。conn 显式传入时只关该连接(分段触发路径);
+        不传时关闭记录中的当前活跃连接(close() 全局清理路径)。"""
+        if conn is None:
+            with self._lock:
+                conn = self._client_conn
+                self._client_conn = None
         if conn is not None:
             try:
                 conn.close()
@@ -186,14 +197,22 @@ class FLVProxy:
     # ---------- 解析与转发 ----------
 
     def _parse_and_forward(self, src, dst) -> None:
-        # 每个新连接(新文件)重置计数
+        # 每个新连接(新文件)重置计数与节流起点: 节流只防同一连接内快速连续
+        # 触发, 新文件的真实参数变化不应被上一个文件的节流窗口压住(否则
+        # 新文件会混入两段参数=花屏); 相同 SPS 重发已由内容比对过滤
         with self._lock:
             self._avc_header_count = 0
             self._first_sps = None
             self._pending_segment = False
+            self._last_segment_at = 0.0
 
         header = src.read(self.FLV_HEADER_SIZE)
         if len(header) != self.FLV_HEADER_SIZE:
+            return
+        if header[:3] != b"FLV":
+            # 上游返回的非 FLV 内容(WAF/HTML 挑战页等): 不转发, 连接直接关闭,
+            # ffmpeg 快速失败进入重试, 避免把垃圾字节当视频流转发
+            logger.warning(f"flv_proxy upstream not FLV magic: {self.upstream_url}")
             return
         dst.sendall(header)
 
@@ -246,9 +265,10 @@ class FLVProxy:
         is_keyframe = frame_type == self.KEYFRAME_FRAME_TYPE and avc_packet_type == self.AVC_NALU
         if is_keyframe and self._pending_segment:
             with self._lock:
-                if time.time() - self._last_segment_at < self.min_segment_interval:
-                    # 距上次分段过近(如 CDN 周期性重发 SPS): 保留标记, 等下个关键帧延迟分段
+                # monotonic: 系统时钟回拨(NTP 校准/手动改时)不会冻结节流窗口
+                if time.monotonic() - self._last_segment_at < self.min_segment_interval:
+                    # 距上次分段过近(同一连接内快速连续变化): 保留标记, 等下个关键帧延迟分段
                     return
-                self._last_segment_at = time.time()
+                self._last_segment_at = time.monotonic()
             self._pending_segment = False
             raise SegmentRequired()
