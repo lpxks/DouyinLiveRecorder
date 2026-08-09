@@ -256,6 +256,62 @@ def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> No
         logger.error(f'An unknown error occurred: {e}')
 
 
+def analyze_resolution_changes(file_path: str) -> list:
+    """录制后检测文件内出现过的分辨率(ffprobe 只解关键帧, 秒级)。
+
+    返回出现过的分辨率列表: 空 = 无法检测/无视频流; 长度 > 1 = 发生过分辨率切换。
+    参照 biliLive-tools analyzeResolutionChanges(packages/shared/src/task/video.ts):
+    -skip_frame nokey 只解关键帧, 大文件也只要几秒; 与 flv_proxy 实时分段互补,
+    兜底直录 TS/MKV、HLS 源等不走代理的路径。
+    """
+    if shutil.which("ffprobe") is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-skip_frame", "nokey",
+             "-select_streams", "v:0",
+             "-show_entries", "frame=width,height",
+             "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=120, startupinfo=get_startup_info(os_type)
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    resolutions = []
+    for line in result.stdout.splitlines():
+        parts = line.split(',')
+        if len(parts) >= 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            resolutions.append(f"{int(parts[0])}x{int(parts[1])}")
+    return list(dict.fromkeys(resolutions))
+
+
+def check_resolution_changes(save_file_path: str, record_name: str) -> None:
+    """录制结束后(线程内)扫描文件分辨率变化: 展开分段模板(%03d)后逐个扫描。
+
+    与 flv_proxy 的实时分段互补: 后者只覆盖 FLV 代理路径, 这里兜底所有录完的
+    文件(直录 TS/MKV、HLS 源等), 确认每个文件内部参数是否统一。
+    """
+    directory, filename = os.path.split(save_file_path)
+    if '%' in filename:
+        prefix = filename.split('%')[0]
+        for path in sorted(utils.get_file_paths(directory)):
+            if os.path.basename(path).startswith(prefix):
+                _report_resolution_changes(path, record_name)
+    else:
+        _report_resolution_changes(save_file_path, record_name)
+
+
+def _report_resolution_changes(file_path: str, record_name: str) -> None:
+    resolutions = analyze_resolution_changes(file_path)
+    if len(resolutions) > 1:
+        color_obj.print_colored(
+            f"[{record_name}] 检测到分辨率变化({len(resolutions)}种): "
+            f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}",
+            color_obj.YELLOW)
+        logger.warning(f"分辨率变化检测: {file_path} 出现过 {resolutions}")
+
+
 def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> None:
     try:
         if os.path.exists(converts_file_path) and os.path.getsize(converts_file_path) > 0:
@@ -493,6 +549,13 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
 
     else:
         color_obj.print_colored(f"\n{record_name} {stop_time} 直播录制出错,返回码: {return_code}\n", color_obj.RED)
+
+    # 录制后兜底检测分辨率变化(线程内跑, 不阻塞重试/转码):
+    # 正常结束与断流/分段文件都扫——断流文件在直录/HLS 等不走 FLV 代理的路径下
+    # 可能混入多段参数, 这是 flv_proxy 实时分段覆盖不到的
+    if detect_resolution_change and save_file_path.endswith(('.ts', '.flv', '.mkv', '.mp4')):
+        threading.Thread(target=check_resolution_changes,
+                         args=(save_file_path, record_name), daemon=True).start()
 
     recording.discard(record_name)
     return False
@@ -1900,6 +1963,8 @@ while True:
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
     priority_delay = max(1, int(read_config_value(config, '优先监控', '优先监控轮询间隔(秒)', 3)))
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
+    detect_resolution_change = options.get(
+        read_config_value(config, '录制设置', '录制完成后检测分辨率变化(是/否)', "是"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
     create_time_file = options.get(read_config_value(config, '录制设置', '生成时间字幕文件', "否"), False)
