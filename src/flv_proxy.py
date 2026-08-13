@@ -166,6 +166,10 @@ class FLVProxy:
 
     def _handle_client(self, client_conn: socket.socket) -> None:
         try:
+            # 客户端 socket 超时(从请求头读取起就生效): ffmpeg 停止消费(demuxer
+            # 报错)时 sendall/recv 不再无限阻塞, 异常客户端(连接后不发请求)也会
+            # 在超时后线程退出清理, 后续重连由新线程服务
+            client_conn.settimeout(30)
             # 读 ffmpeg 的 HTTP 请求头(直到空行)
             request = b""
             while b"\r\n\r\n" not in request:
@@ -177,9 +181,6 @@ class FLVProxy:
                     return
 
             try:
-                # 客户端 socket 超时: ffmpeg 停止消费(demuxer 报错)时 sendall/recv
-                # 不再无限阻塞, 线程超时退出清理, 后续重连由新线程服务
-                client_conn.settimeout(30)
                 # 读超时 12s: 与 ffmpeg 的 -rw_timeout 15s 对齐——上游停滞时旧线程
                 # 先于 ffmpeg 退出清理上游连接, 重试的新连接不会堆积 stale GET;
                 # trust_env=False: 只走显式 proxy_addr, 不受系统 HTTP_PROXY 环境变量劫持
@@ -223,12 +224,17 @@ class FLVProxy:
                 pass
 
     def _force_close_client(self, conn: socket.socket | None = None) -> None:
-        """关闭到 ffmpeg 的连接。conn 显式传入时只关该连接(分段触发路径);
-        不传时关闭记录中的当前活跃连接(close() 全局清理路径)。"""
+        """关闭到 ffmpeg 的连接。conn 显式传入时只关该连接(分段触发路径),
+        若槽中记录的正是该连接则一并清槽; 不传时关闭记录中的当前活跃连接
+        (close() 全局清理路径)。"""
         if conn is None:
             with self._lock:
                 conn = self._client_conn
                 self._client_conn = None
+        else:
+            with self._lock:
+                if self._client_conn is conn:
+                    self._client_conn = None
         if conn is not None:
             try:
                 conn.close()
