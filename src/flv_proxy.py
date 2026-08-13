@@ -31,6 +31,37 @@ class SegmentRequired(Exception):
     """分段条件触发(新 SPS/PPS 之后遇到关键帧)。"""
 
 
+def normalize_tag_timestamp(tag_header: bytes, last_ts: int | None, ts_offset: int,
+                            max_forward_gap_ms: int) -> tuple[bytes, int | None, int]:
+    """归一化上游时间戳向前跳变, 返回(重写后的 tag 头, 新 last_ts, 新偏移)。
+
+    CDN 缓冲/推流时钟切换会在流中段或结尾发出时间戳大幅超前的 tag,
+    直接透传会吃进文件 duration, 导致录制时长虚高(如 20 分钟显示 2 小时)。
+    检测到跳变时吸收偏移量并重写后续 tag 时间戳, 使时间轴连续; 内容字节
+    不变, 只有 4 字节时间戳被修正。向后跳变(时间戳回退)ffmpeg 自身会钳制
+    (实测验证), 这里原样放行。
+
+    状态由调用方持有(每个连接一份局部变量): 多连接并发时各时间轴互不污染。
+    """
+    # tag 头布局: PreviousTagSize(4) + type(1) + data_size(3) + ts(3) + ts_ext(1) + stream_id(3)
+    ts = (tag_header[11] << 24) | (tag_header[8] << 16) | (tag_header[9] << 8) | tag_header[10]
+    adj = ts - ts_offset
+    if last_ts is not None and adj - last_ts > max_forward_gap_ms:
+        jump = adj - last_ts
+        ts_offset += jump
+        adj -= jump
+        logger.warning(f"flv_proxy 上游时间戳向前跳变 +{jump}ms, 已归一化时间轴")
+    if adj < 0:
+        # 跳变吸收后时间轴回退(如上游整体重启): 不动原字节, ffmpeg 自行钳制
+        return tag_header, last_ts, ts_offset
+    if adj == ts:
+        return tag_header, adj, ts_offset
+    buf = bytearray(tag_header)
+    buf[8:11] = (adj & 0xFFFFFF).to_bytes(3, 'big')
+    buf[11] = (adj >> 24) & 0xFF
+    return bytes(buf), adj, ts_offset
+
+
 class _BufferedStream:
     """按需读取包装:httpx iter_bytes 是分块产出, 解析需要精确按 N 字节读。"""
 
@@ -96,8 +127,6 @@ class FLVProxy:
         self._pending_segment = False
         self._last_segment_at = 0.0
         self._client_conn = None  # 到 ffmpeg 的连接, 用于强制断连
-        self._last_tag_ts: int | None = None  # 上一个 tag 的归一化时间戳(ms)
-        self._ts_offset = 0  # 时间戳跳变吸收的累计偏移量(ms)
 
         self._thread: threading.Thread | None = None
         self._closed = False
@@ -217,8 +246,9 @@ class FLVProxy:
             self._first_sps = None
             self._pending_segment = False
             self._last_segment_at = 0.0
-            self._last_tag_ts = None
-            self._ts_offset = 0
+        # 时间戳归一化状态是每连接局部变量(连接并发时各时间轴互不污染)
+        last_ts: int | None = None
+        ts_offset = 0
 
         header = src.read(self.FLV_HEADER_SIZE)
         if len(header) != self.FLV_HEADER_SIZE:
@@ -234,7 +264,8 @@ class FLVProxy:
             tag_header = src.read(self.TAG_HEADER_SIZE)
             if len(tag_header) != self.TAG_HEADER_SIZE:
                 return
-            tag_header = self._normalize_tag_timestamp(tag_header)
+            tag_header, last_ts, ts_offset = normalize_tag_timestamp(
+                tag_header, last_ts, ts_offset, self.max_forward_gap_ms)
             data_size = (tag_header[5] << 16) | (tag_header[6] << 8) | tag_header[7]
             tag_data = src.read(data_size)
             if len(tag_data) != data_size:
@@ -251,34 +282,6 @@ class FLVProxy:
                     raise
             dst.sendall(tag_header)
             dst.sendall(tag_data)
-
-    def _normalize_tag_timestamp(self, tag_header: bytes) -> bytes:
-        """归一化上游时间戳向前跳变, 返回(可能重写时间戳后的)tag 头。
-
-        CDN 缓冲/推流时钟切换会在流中段或结尾发出时间戳大幅超前的 tag,
-        直接透传会吃进文件 duration, 导致录制时长虚高(如 20 分钟显示 2 小时)。
-        检测到跳变时吸收偏移量并重写后续 tag 时间戳, 使时间轴连续; 内容字节
-        不变, 只有 4 字节时间戳被修正。向后跳变(时间戳回退)ffmpeg 自身会钳制
-        (实测验证), 这里原样放行。
-        """
-        # tag 头布局: PreviousTagSize(4) + type(1) + data_size(3) + ts(3) + ts_ext(1) + stream_id(3)
-        ts = (tag_header[11] << 24) | (tag_header[8] << 16) | (tag_header[9] << 8) | tag_header[10]
-        adj = ts - self._ts_offset
-        if self._last_tag_ts is not None and adj - self._last_tag_ts > self.max_forward_gap_ms:
-            jump = adj - self._last_tag_ts
-            self._ts_offset += jump
-            adj -= jump
-            logger.warning(f"flv_proxy 上游时间戳向前跳变 +{jump}ms, 已归一化时间轴")
-        if adj < 0:
-            # 跳变吸收后时间轴回退(如上游整体重启): 不动原字节, ffmpeg 自行钳制
-            return tag_header
-        self._last_tag_ts = adj
-        if adj == ts:
-            return tag_header
-        buf = bytearray(tag_header)
-        buf[8:11] = (adj & 0xFFFFFF).to_bytes(3, 'big')
-        buf[11] = (adj >> 24) & 0xFF
-        return bytes(buf)
 
     def _check_video_tag(self, data: bytes) -> None:
         """检测第二个 AVC sequence header(分辨率/参数变化)并在关键帧处触发分段。
@@ -306,12 +309,14 @@ class FLVProxy:
                     self._pending_segment = True
 
         is_keyframe = frame_type == self.KEYFRAME_FRAME_TYPE and avc_packet_type == self.AVC_NALU
-        if is_keyframe and self._pending_segment:
+        if is_keyframe:
             with self._lock:
+                if not self._pending_segment:
+                    return
                 # monotonic: 系统时钟回拨(NTP 校准/手动改时)不会冻结节流窗口
                 if time.monotonic() - self._last_segment_at < self.min_segment_interval:
                     # 距上次分段过近(同一连接内快速连续变化): 保留标记, 等下个关键帧延迟分段
                     return
                 self._last_segment_at = time.monotonic()
-            self._pending_segment = False
+                self._pending_segment = False
             raise SegmentRequired()

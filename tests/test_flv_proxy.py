@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 
-from src.flv_proxy import FLVProxy, SegmentRequired
+from src.flv_proxy import FLVProxy, SegmentRequired, normalize_tag_timestamp
 
 # FLV 常量
 AVC = 7
@@ -126,63 +126,57 @@ def parse_tag_ts(tag_header: bytes) -> int:
 
 
 class TimestampNormalizeTest(unittest.TestCase):
-    """_normalize_tag_timestamp 状态机(结尾时间戳跳变 → 时长虚高的修复)。"""
-
-    def setUp(self):
-        self.proxy = FLVProxy("http://127.0.0.1:1/x.flv")
-        self.proxy._last_tag_ts = None
-        self.proxy._ts_offset = 0
+    """normalize_tag_timestamp 状态机(结尾时间戳跳变 → 时长虚高的修复)。"""
 
     def header_with_ts(self, ts: int) -> bytes:
         # 取 make_video_tag 的 15 字节 tag 头部分
         return make_video_tag(KEYFRAME, AVC, NALU, ts=ts)[:15]
 
+    def norm(self, header, last_ts, offset):
+        return normalize_tag_timestamp(header, last_ts, offset, FLVProxy.MAX_FORWARD_GAP_MS)
+
     def test_normal_progress_untouched(self):
-        h1 = self.proxy._normalize_tag_timestamp(self.header_with_ts(0))
-        h2 = self.proxy._normalize_tag_timestamp(self.header_with_ts(100))
-        self.assertEqual(parse_tag_ts(h1), 0)
-        self.assertEqual(parse_tag_ts(h2), 100)
+        h1, last, off = self.norm(self.header_with_ts(0), None, 0)
+        self.assertEqual((parse_tag_ts(h1), last, off), (0, 0, 0))
+        h2, last2, _ = self.norm(self.header_with_ts(100), last, off)
+        self.assertEqual((parse_tag_ts(h2), last2), (100, 100))
 
     def test_forward_jump_absorbed(self):
         """向前跳变(如结尾 +30s)被吸收: 重写为与上一 tag 连续。"""
-        self.proxy._last_tag_ts = 24000
-        self.proxy._normalize_tag_timestamp(self.header_with_ts(24050))
-        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))  # +30s 跳变
+        _, last, off = self.norm(self.header_with_ts(24050), 24000, 0)
+        h, last2, off2 = self.norm(self.header_with_ts(54000), last, off)  # +30s 跳变
         self.assertEqual(parse_tag_ts(h), 24050)
-        self.assertEqual(self.proxy._ts_offset, 29950)
+        self.assertEqual((last2, off2), (24050, 29950))
 
     def test_subsequent_tags_shifted_by_offset(self):
         """跳变吸收后, 后续 tag 整体平移(保留内部间隔)。"""
-        self.proxy._last_tag_ts = 24000
-        self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))  # 吸收 +30000
-        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(54100))
+        h1, last, off = self.norm(self.header_with_ts(54000), 24000, 0)  # 吸收 +30000
+        h, _, _ = self.norm(self.header_with_ts(54100), last, off)
         self.assertEqual(parse_tag_ts(h), 24100)
 
     def test_second_jump_accumulates(self):
-        self.proxy._last_tag_ts = 24000
-        self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))
-        self.proxy._normalize_tag_timestamp(self.header_with_ts(54100))
-        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(90000))  # 第二次跳变
+        _, last, off = self.norm(self.header_with_ts(54000), 24000, 0)
+        _, last, off = self.norm(self.header_with_ts(54100), last, off)
+        h, _, off = self.norm(self.header_with_ts(90000), last, off)  # 第二次跳变
         self.assertEqual(parse_tag_ts(h), 24100)
+        self.assertEqual(off, 65900)
 
     def test_small_gap_not_treated_as_jump(self):
         """正常步长(如停滞恢复的数秒推进)不触发归一化。"""
-        self.proxy._last_tag_ts = 24000
-        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(24050))
-        self.assertEqual(parse_tag_ts(h), 24050)
+        h, _, off = self.norm(self.header_with_ts(24050), 24000, 0)
+        self.assertEqual((parse_tag_ts(h), off), (24050, 0))
 
     def test_backward_ts_passed_through(self):
         """时间戳回退原样放行(ffmpeg 自行钳制, 实测不膨胀时长)。"""
-        self.proxy._last_tag_ts = 24000
-        self.proxy._ts_offset = 30000
         orig = self.header_with_ts(1000)
-        self.assertEqual(self.proxy._normalize_tag_timestamp(orig), orig)
+        h, last, off = self.norm(orig, 24000, 30000)
+        self.assertEqual(h, orig)
+        self.assertEqual((last, off), (24000, 30000))  # 状态不被回退破坏
 
     def test_high_timestamp_ext_byte_written(self):
-        """归一化后超过 24 位的值正确写入 ts_ext 字节。"""
-        self.proxy._last_tag_ts = None
-        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(0x1234567))
-        self.assertEqual(parse_tag_ts(h), 0x1234567)
+        """超过 24 位的值正确读写 ts_ext 字节。"""
+        h, last, _ = self.norm(self.header_with_ts(0x1234567), None, 0)
+        self.assertEqual((parse_tag_ts(h), last), (0x1234567, 0x1234567))
 
 
 class ProxyIntegrationTest(unittest.TestCase):
