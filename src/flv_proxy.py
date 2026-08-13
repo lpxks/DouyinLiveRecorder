@@ -1,11 +1,15 @@
 """FLV 流透明代理:检测 AVC sequence header(SPS/PPS)二次出现——即分辨率/编码参数
 切换——并在下一个关键帧处关闭到 ffmpeg 的连接, 让 ffmpeg 读到 EOF 自然收尾当前
 文件; 由上层录制循环重开新文件(新容器头, 参数正确), 避免"参数变化后永久花屏"。
+同时归一化上游时间戳向前跳变(CDN 缓冲/推流时钟切换常在流中段或结尾发出大幅
+超前的时间戳), 否则跳变直接透传会吃进文件 duration(MKV duration = 最后 PTS -
+第一 PTS), 导致"20 分钟视频显示 2 小时"的时长虚高。
 
 参考 bililive-go src/pkg/flvproxy/proxy.go 的实现:
 - 检测与触发分离: 第二个 SPS/PPS 只是"标记待分段", 等到关键帧才真正断连
   (分段点在 GOP 边界, 两个文件各自可独立解码、无缝拼接)
 - 对 ffmpeg 完全透明: 断连 = EOF, ffmpeg 正常收尾
+时间戳归一化是本地扩展(bililive-go 无此处理)。
 """
 
 import socket
@@ -65,13 +69,19 @@ class FLVProxy:
     AVC_SEQ_HEADER = 0
     AVC_NALU = 1
     KEYFRAME_FRAME_TYPE = 1
+    # 相邻 tag 时间戳允许的正常前进步长: 超过即视为时间轴跳变(CDN 缓冲/时钟
+    # 切换), 正常直播相邻帧间隔是毫秒级, 停滞恢复的时间戳推进也属跳变, 归一化
+    # 后时长反映真实录制内容
+    MAX_FORWARD_GAP_MS = 10_000
 
     def __init__(self, upstream_url: str, headers: dict | None = None,
-                 proxy_addr: str | None = None, min_segment_interval: float = 10.0):
+                 proxy_addr: str | None = None, min_segment_interval: float = 10.0,
+                 max_forward_gap_ms: int = MAX_FORWARD_GAP_MS):
         self.upstream_url = upstream_url
         self.headers = headers or {}
         self.proxy_addr = proxy_addr
         self.min_segment_interval = min_segment_interval
+        self.max_forward_gap_ms = max_forward_gap_ms
 
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -86,6 +96,8 @@ class FLVProxy:
         self._pending_segment = False
         self._last_segment_at = 0.0
         self._client_conn = None  # 到 ffmpeg 的连接, 用于强制断连
+        self._last_tag_ts: int | None = None  # 上一个 tag 的归一化时间戳(ms)
+        self._ts_offset = 0  # 时间戳跳变吸收的累计偏移量(ms)
 
         self._thread: threading.Thread | None = None
         self._closed = False
@@ -205,6 +217,8 @@ class FLVProxy:
             self._first_sps = None
             self._pending_segment = False
             self._last_segment_at = 0.0
+            self._last_tag_ts = None
+            self._ts_offset = 0
 
         header = src.read(self.FLV_HEADER_SIZE)
         if len(header) != self.FLV_HEADER_SIZE:
@@ -220,6 +234,7 @@ class FLVProxy:
             tag_header = src.read(self.TAG_HEADER_SIZE)
             if len(tag_header) != self.TAG_HEADER_SIZE:
                 return
+            tag_header = self._normalize_tag_timestamp(tag_header)
             data_size = (tag_header[5] << 16) | (tag_header[6] << 8) | tag_header[7]
             tag_data = src.read(data_size)
             if len(tag_data) != data_size:
@@ -236,6 +251,34 @@ class FLVProxy:
                     raise
             dst.sendall(tag_header)
             dst.sendall(tag_data)
+
+    def _normalize_tag_timestamp(self, tag_header: bytes) -> bytes:
+        """归一化上游时间戳向前跳变, 返回(可能重写时间戳后的)tag 头。
+
+        CDN 缓冲/推流时钟切换会在流中段或结尾发出时间戳大幅超前的 tag,
+        直接透传会吃进文件 duration, 导致录制时长虚高(如 20 分钟显示 2 小时)。
+        检测到跳变时吸收偏移量并重写后续 tag 时间戳, 使时间轴连续; 内容字节
+        不变, 只有 4 字节时间戳被修正。向后跳变(时间戳回退)ffmpeg 自身会钳制
+        (实测验证), 这里原样放行。
+        """
+        # tag 头布局: PreviousTagSize(4) + type(1) + data_size(3) + ts(3) + ts_ext(1) + stream_id(3)
+        ts = (tag_header[11] << 24) | (tag_header[8] << 16) | (tag_header[9] << 8) | tag_header[10]
+        adj = ts - self._ts_offset
+        if self._last_tag_ts is not None and adj - self._last_tag_ts > self.max_forward_gap_ms:
+            jump = adj - self._last_tag_ts
+            self._ts_offset += jump
+            adj -= jump
+            logger.warning(f"flv_proxy 上游时间戳向前跳变 +{jump}ms, 已归一化时间轴")
+        if adj < 0:
+            # 跳变吸收后时间轴回退(如上游整体重启): 不动原字节, ffmpeg 自行钳制
+            return tag_header
+        self._last_tag_ts = adj
+        if adj == ts:
+            return tag_header
+        buf = bytearray(tag_header)
+        buf[8:11] = (adj & 0xFFFFFF).to_bytes(3, 'big')
+        buf[11] = (adj >> 24) & 0xFF
+        return bytes(buf)
 
     def _check_video_tag(self, data: bytes) -> None:
         """检测第二个 AVC sequence header(分辨率/参数变化)并在关键帧处触发分段。

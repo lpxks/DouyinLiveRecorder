@@ -5,7 +5,11 @@
 """
 
 import http.server
+import os
+import shutil
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -21,13 +25,15 @@ NALU = 1
 
 
 def make_video_tag(frame_type: int, codec_id: int, avc_packet_type: int,
-                   payload: bytes = b"\x00\x00\x00\x00\x00\x00\x00\x00") -> bytes:
-    """构造一个 FLV video tag(含 15 字节 tag 头 + body)。"""
+                   payload: bytes = b"\x00\x00\x00\x00\x00\x00\x00\x00",
+                   ts: int = 0) -> bytes:
+    """构造一个 FLV video tag(含 15 字节 tag 头 + body)。ts 为 32 位时间戳(ms)。"""
     data = bytes([(frame_type << 4) | codec_id, avc_packet_type]) + payload
     tag_header = (b"\x00\x00\x00\x00"          # PreviousTagSize
                   + bytes([9])                 # tag type: video
                   + len(data).to_bytes(3, "big")
-                  + b"\x00\x00\x00\x00"        # timestamp
+                  + (ts & 0xFFFFFF).to_bytes(3, "big")
+                  + bytes([(ts >> 24) & 0xFF])  # timestamp ext
                   + b"\x00\x00\x00")           # stream id
     return tag_header + data
 
@@ -112,6 +118,71 @@ class VideoTagStateTest(unittest.TestCase):
         self.assertTrue(FLVProxy.is_flv_stream("http://x.com/a.flv"))
         self.assertTrue(FLVProxy.is_flv_stream("http://x.com/a?format=flv"))
         self.assertFalse(FLVProxy.is_flv_stream("http://x.com/a.m3u8"))
+
+
+def parse_tag_ts(tag_header: bytes) -> int:
+    """从 15 字节 tag 头解析 32 位时间戳(ms)。"""
+    return (tag_header[11] << 24) | (tag_header[8] << 16) | (tag_header[9] << 8) | tag_header[10]
+
+
+class TimestampNormalizeTest(unittest.TestCase):
+    """_normalize_tag_timestamp 状态机(结尾时间戳跳变 → 时长虚高的修复)。"""
+
+    def setUp(self):
+        self.proxy = FLVProxy("http://127.0.0.1:1/x.flv")
+        self.proxy._last_tag_ts = None
+        self.proxy._ts_offset = 0
+
+    def header_with_ts(self, ts: int) -> bytes:
+        # 取 make_video_tag 的 15 字节 tag 头部分
+        return make_video_tag(KEYFRAME, AVC, NALU, ts=ts)[:15]
+
+    def test_normal_progress_untouched(self):
+        h1 = self.proxy._normalize_tag_timestamp(self.header_with_ts(0))
+        h2 = self.proxy._normalize_tag_timestamp(self.header_with_ts(100))
+        self.assertEqual(parse_tag_ts(h1), 0)
+        self.assertEqual(parse_tag_ts(h2), 100)
+
+    def test_forward_jump_absorbed(self):
+        """向前跳变(如结尾 +30s)被吸收: 重写为与上一 tag 连续。"""
+        self.proxy._last_tag_ts = 24000
+        self.proxy._normalize_tag_timestamp(self.header_with_ts(24050))
+        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))  # +30s 跳变
+        self.assertEqual(parse_tag_ts(h), 24050)
+        self.assertEqual(self.proxy._ts_offset, 29950)
+
+    def test_subsequent_tags_shifted_by_offset(self):
+        """跳变吸收后, 后续 tag 整体平移(保留内部间隔)。"""
+        self.proxy._last_tag_ts = 24000
+        self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))  # 吸收 +30000
+        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(54100))
+        self.assertEqual(parse_tag_ts(h), 24100)
+
+    def test_second_jump_accumulates(self):
+        self.proxy._last_tag_ts = 24000
+        self.proxy._normalize_tag_timestamp(self.header_with_ts(54000))
+        self.proxy._normalize_tag_timestamp(self.header_with_ts(54100))
+        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(90000))  # 第二次跳变
+        self.assertEqual(parse_tag_ts(h), 24100)
+
+    def test_small_gap_not_treated_as_jump(self):
+        """正常步长(如停滞恢复的数秒推进)不触发归一化。"""
+        self.proxy._last_tag_ts = 24000
+        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(24050))
+        self.assertEqual(parse_tag_ts(h), 24050)
+
+    def test_backward_ts_passed_through(self):
+        """时间戳回退原样放行(ffmpeg 自行钳制, 实测不膨胀时长)。"""
+        self.proxy._last_tag_ts = 24000
+        self.proxy._ts_offset = 30000
+        orig = self.header_with_ts(1000)
+        self.assertEqual(self.proxy._normalize_tag_timestamp(orig), orig)
+
+    def test_high_timestamp_ext_byte_written(self):
+        """归一化后超过 24 位的值正确写入 ts_ext 字节。"""
+        self.proxy._last_tag_ts = None
+        h = self.proxy._normalize_tag_timestamp(self.header_with_ts(0x1234567))
+        self.assertEqual(parse_tag_ts(h), 0x1234567)
 
 
 class ProxyIntegrationTest(unittest.TestCase):
@@ -227,6 +298,89 @@ class ProxyResilienceTest(unittest.TestCase):
                 source.shutdown()
         finally:
             proxy.close()
+
+
+@unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'),
+                     "需要本机 ffmpeg/ffprobe")
+class TimestampNormalizeEndToEndTest(unittest.TestCase):
+    """端到端: 结尾时间戳跳变的 FLV 走代理录制, 时长应恢复为真实内容时长。"""
+
+    @classmethod
+    def setUpClass(cls):
+        # 用真实 ffmpeg 生成 30s FLV, 再把尾部(25s 起)tag 时间戳 +30s 制造"结尾跳变"
+        cls.tmpdir = tempfile.mkdtemp()
+        src = os.path.join(cls.tmpdir, "src.flv")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
+             "-t", "30", "-c:v", "libx264", "-preset", "ultrafast",
+             "-f", "flv", src],
+            capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr)
+        cls.stream_data = _shift_flv_timestamps(open(src, "rb").read(), 25000, 30000)
+
+        class FlvSource(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "video/x-flv")
+                self.send_header("Content-Length", str(len(cls.stream_data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(cls.stream_data)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        cls.source = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FlvSource)
+        cls.source_thread = threading.Thread(target=cls.source.serve_forever, daemon=True)
+        cls.source_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.source.shutdown()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_recorded_duration_matches_content(self):
+        proxy = FLVProxy(f"http://127.0.0.1:{self.source.server_address[1]}/x.flv")
+        proxy.start()
+        out = os.path.join(self.tmpdir, "out.mkv")
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", proxy.local_url,
+                 "-c", "copy", "-f", "matroska", out],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            dur = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", out],
+                capture_output=True, text=True, timeout=30).stdout.strip()
+            # 归一化后时长≈真实内容 30s(不归一化会虚高为 60s)
+            self.assertGreater(float(dur), 29.0, f"时长异常: {dur}")
+            self.assertLess(float(dur), 31.0, f"时长虚高: {dur}")
+        finally:
+            proxy.close()
+
+
+def _shift_flv_timestamps(data: bytes, from_ms: int, delta_ms: int) -> bytes:
+    """把 FLV 中时间戳 >= from_ms 的 tag 整体平移 delta_ms(制造结尾跳变)。"""
+    buf = bytearray(data)
+    pos = 9
+    while pos + 15 <= len(buf):
+        dlen = int.from_bytes(buf[pos + 5:pos + 8], 'big')
+        if pos + 15 + dlen > len(buf):
+            break
+        ts = (buf[pos + 11] << 24) | (buf[pos + 8] << 16) | (buf[pos + 9] << 8) | buf[pos + 10]
+        if ts >= from_ms:
+            new_ts = ts + delta_ms
+            buf[pos + 8:pos + 11] = (new_ts & 0xFFFFFF).to_bytes(3, 'big')
+            buf[pos + 11] = (new_ts >> 24) & 0xFF
+        pos = pos + 15 + dlen
+    return bytes(buf)
 
 
 if __name__ == "__main__":
