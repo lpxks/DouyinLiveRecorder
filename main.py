@@ -304,6 +304,52 @@ def check_resolution_changes(save_file_path: str, record_name: str) -> None:
         _report_resolution_changes(save_file_path, record_name)
 
 
+def detect_pts_jumps(file_path: str) -> str | None:
+    """录制后检测时间戳跳变, 返回跳变描述或 None。
+
+    上游 CDN 偶发发出 ts_ext 字节异常的 tag(如 0xFF → 解析为 2^32ms≈49.7 天),
+    经 ffmpeg 写入文件后 duration 严重虚高(几 KB 文件显示上千小时)。
+    小文件全包扫描; 大文件只扫关键帧(跳变通常伴随 GOP 边界), 秒级完成。
+    阈值 1 小时: 直播连续时间轴中相邻包不会出现这么大的正常间隔。
+    """
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        return None
+    if size <= 2 * 1024 * 1024:
+        args = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "packet=pts_time", "-of", "csv=p=0", file_path]
+    else:
+        args = ["ffprobe", "-v", "error", "-skip_frame", "nokey",
+                "-select_streams", "v:0",
+                "-show_entries", "frame=pts_time", "-of", "csv=p=0", file_path]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True,
+                                timeout=120, startupinfo=get_startup_info(os_type))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    prev = None
+    max_jump = 0.0
+    jump_at = None
+    for line in result.stdout.splitlines():
+        try:
+            pts = float(line)
+        except ValueError:
+            continue
+        if prev is not None and pts - prev > 3600:
+            if pts - prev > max_jump:
+                max_jump = pts - prev
+                jump_at = prev
+        prev = pts
+    if jump_at is None:
+        return None
+    return f"{jump_at:.1f}s 处 PTS 跳变 +{max_jump / 3600:.1f} 小时, 时长虚高约 {max_jump / 3600:.1f} 小时"
+
+
 _resolution_scanned = {}  # path -> (size, mtime): 已扫描文件记录, 分段重扫时跳过未变化的
 
 
@@ -324,6 +370,12 @@ def _report_resolution_changes(file_path: str, record_name: str) -> None:
             f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}",
             color_obj.YELLOW)
         logger.warning(f"分辨率变化检测: {file_path} 出现过 {resolutions}")
+    jump = detect_pts_jumps(file_path)
+    if jump:
+        color_obj.print_colored(
+            f"[{record_name}] 检测到时间戳跳变: {jump} 文件: {os.path.basename(file_path)}",
+            color_obj.YELLOW)
+        logger.warning(f"PTS 跳变检测: {file_path} {jump}")
 
 
 def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> None:
