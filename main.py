@@ -262,7 +262,8 @@ def analyze_resolution_changes(file_path: str) -> list:
     返回出现过的分辨率列表: 空 = 无法检测/无视频流; 长度 > 1 = 发生过分辨率切换。
     参照 biliLive-tools analyzeResolutionChanges(packages/shared/src/task/video.ts):
     -skip_frame nokey 只解关键帧, 大文件也只要几秒; 与 flv_proxy 实时分段互补,
-    兜底直录 TS/MKV、HLS 源等不走代理的路径。
+    兜底直录 TS/MKV、HLS 源等不走代理的路径。只做检测告警, 不做自动修复;
+    只扫第一个视频流(直播录制文件通常是单视频流)。
     """
     if shutil.which("ffprobe") is None:
         return []
@@ -304,8 +305,8 @@ def check_resolution_changes(save_file_path: str, record_name: str) -> None:
         _report_resolution_changes(save_file_path, record_name)
 
 
-def detect_pts_jumps(file_path: str) -> str | None:
-    """录制后检测时间戳跳变, 返回跳变描述或 None。
+def _scan_pts_jumps(file_path: str) -> dict | None:
+    """逐流扫描相邻包 pts 间隔, 返回 {stream_index: (jump_at_ms, jump_ms, tail_safe)}。
 
     上游 CDN 偶发发出 ts_ext 字节异常的 tag(如 0xFF → 解析为 2^32ms≈49.7 天),
     经 ffmpeg 写入文件后 duration 严重虚高(几 KB 文件显示上千小时)。
@@ -315,6 +316,10 @@ def detect_pts_jumps(file_path: str) -> str | None:
     packet 级扫描只解复用不解码, 大文件也很快; 此前大文件走 -skip_frame nokey
     只解关键帧, 关键帧之间发生的跳变会漏检(坏 ts_ext tag 通常是普通帧)。
     超长文件全包 csv 可达数百 MB, stdout 由读线程逐行增量解析, 不整块缓冲。
+
+    jump_at/jump 单位毫秒; tail_safe 表示该流跳变后时间轴未回退到跳变前区间
+    (自动修复的安全条件: 修复会把跳变后的包整体平移, 时间轴回退的流会被改坏)。
+    无跳变返回 None。
     """
     if shutil.which("ffprobe") is None:
         return None
@@ -329,10 +334,9 @@ def detect_pts_jumps(file_path: str) -> str | None:
     result = {}
 
     def parse_stream() -> None:
-        # 逐行增量解析: 只保留每个流的上一个 pts + 最大跳变, 内存 O(流数)
+        # 逐行增量解析: 只保留每个流的上一个 pts + 跳变信息, 内存 O(流数)
         prev = {}  # stream_index -> 上一个 pts(按流分别追踪)
-        max_jump = 0.0
-        jump_at = None
+        jumps = {}  # stream_index -> [jump_at_ms, jump_ms, min_after_ms|None]
         try:
             for line in process.stdout:
                 parts = line.split(',')
@@ -340,18 +344,25 @@ def detect_pts_jumps(file_path: str) -> str | None:
                     continue
                 try:
                     stream_index = int(parts[0])
-                    pts = float(parts[1])
+                    pts_ms = float(parts[1]) * 1000
                 except ValueError:
                     continue
-                if stream_index in prev and pts - prev[stream_index] > 300:
-                    if pts - prev[stream_index] > max_jump:
-                        max_jump = pts - prev[stream_index]
-                        jump_at = prev[stream_index]
-                prev[stream_index] = pts
+                if stream_index in prev and pts_ms - prev[stream_index] > 300_000:
+                    # 记录该流最大的跳变; 更大的后续跳变会覆盖并重新开始追踪回退
+                    if stream_index not in jumps or pts_ms - prev[stream_index] > jumps[stream_index][1]:
+                        jumps[stream_index] = [prev[stream_index], pts_ms - prev[stream_index], None]
+                elif stream_index in jumps:
+                    # 跳变之后仍持续追踪该流的最小 pts, 用于判断时间轴是否回退
+                    min_after = jumps[stream_index][2]
+                    if min_after is None or pts_ms < min_after:
+                        jumps[stream_index][2] = pts_ms
+                prev[stream_index] = pts_ms
         except (OSError, ValueError):
             pass
-        result['max_jump'] = max_jump
-        result['jump_at'] = jump_at
+        for stream_index, (jump_at, jump, min_after) in jumps.items():
+            # 10s 容差吸收 B 帧 pts 乱序抖动: 跳变后只要没有包回到跳变前区间即视为尾部跳变
+            tail_safe = min_after is None or min_after >= jump_at + jump - 10_000
+            result[stream_index] = (jump_at, jump, tail_safe)
 
     # 读线程与 wait 并发: 主线程限时 120s(ffprobe 卡死时 kill), 读线程消费
     # stdout 防止管道写满阻塞 ffprobe
@@ -366,15 +377,136 @@ def detect_pts_jumps(file_path: str) -> str | None:
     reader.join(timeout=10)
     if process.returncode != 0:
         return None
-    jump_at = result.get('jump_at')
-    if jump_at is None:
-        return None
-    max_jump = result.get('max_jump', 0.0)
-    if max_jump >= 3600:
-        human = f"{max_jump / 3600:.1f} 小时"
+    return result or None
+
+
+def _format_jump(jump_at_ms: float, jump_ms: float) -> str:
+    """把 (跳变点, 跳变量) 格式化为人类可读描述(jump 单位为毫秒)。"""
+    if jump_ms >= 3_600_000:
+        human = f"{jump_ms / 3_600_000:.1f} 小时"
     else:
-        human = f"{max_jump / 60:.0f} 分钟"
-    return f"{jump_at:.1f}s 处 PTS 跳变 +{human}, 时长虚高约 {human}"
+        human = f"{jump_ms / 60_000:.0f} 分钟"
+    return f"{jump_at_ms / 1000:.1f}s 处 PTS 跳变 +{human}, 时长虚高约 {human}"
+
+
+def detect_pts_jumps(file_path: str) -> str | None:
+    """录制后检测时间戳跳变, 返回跳变描述或 None(检测逻辑见 _scan_pts_jumps)。"""
+    jumps = _scan_pts_jumps(file_path)
+    if not jumps:
+        return None
+    jump_at, jump, _tail_safe = max(jumps.values(), key=lambda item: item[1])
+    return _format_jump(jump_at, jump)
+
+
+def repair_pts_jumps(file_path: str, jumps: dict) -> bool:
+    """对检测到时间戳跳变的文件做 -c copy 自动修复, 返回是否已修复。
+
+    用 setts 比特流过滤器(ffmpeg >= 5.1)把跳变之后的包时间戳整体平移回连续
+    时间轴, 不重编码、内容字节不变。仅当文件为常规单视频(+可选单音频)结构、
+    所有音视频流在同一位置发生相同量级跳变、且跳变后时间轴未回退(尾部跳变)
+    时才修复; 输出到临时文件并校验时长显著回落, 成功后原子替换原文件,
+    任何一步失败都保留原文件不动。
+    """
+    if FFMPEG_VERSION_MAJOR < 5:
+        logger.warning(f"当前 ffmpeg 版本不支持 setts 过滤器, 跳过自动修复: {file_path}")
+        return False
+    if shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None:
+        return False
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=index,codec_type,time_base",
+             "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=60, startupinfo=get_startup_info(os_type))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if probe.returncode != 0:
+        return False
+    streams = {}  # stream_index -> (codec_type, "num/den")
+    for line in probe.stdout.splitlines():
+        parts = line.split(',')
+        if len(parts) == 3 and parts[0].strip().isdigit() and parts[1] in ('video', 'audio') \
+                and '/' in parts[2]:
+            streams[int(parts[0].strip())] = (parts[1], parts[2].strip())
+    video_idx = [i for i, (t, _) in streams.items() if t == 'video']
+    audio_idx = [i for i, (t, _) in streams.items() if t == 'audio']
+    # 只处理常规单视频(+可选单音频)录制: 多流文件修复条件复杂, 保守跳过
+    if len(video_idx) != 1 or len(audio_idx) > 1:
+        logger.warning(f"流结构非单视频/单音频, 跳过自动修复: {file_path}")
+        return False
+    target = [video_idx[0]] + (audio_idx if audio_idx else [])
+    if any(i not in jumps for i in target):
+        logger.warning(f"跳变未覆盖所有音视频流, 跳过自动修复: {file_path}")
+        return False
+    # 各流跳变位置/量级需一致(1s 容差), 且均为尾部跳变, 否则平移修复会改坏时间轴
+    ref_at, ref_jump, _ = jumps[video_idx[0]]
+    for i in target:
+        jump_at, jump, tail_safe = jumps[i]
+        if abs(jump_at - ref_at) > 1000 or abs(jump - ref_jump) > 1000 or not tail_safe:
+            logger.warning(f"跳变形态不满足修复条件(流 {i}), 跳过自动修复: {file_path}")
+            return False
+
+    def duration_of(path: str) -> float:
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", path],
+                capture_output=True, text=True, timeout=60, startupinfo=get_startup_info(os_type))
+            return float(r.stdout.strip()) if r.returncode == 0 else -1.0
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return -1.0
+
+    orig_dur = duration_of(file_path)
+    if orig_dur <= 0:
+        return False
+    ext = os.path.splitext(file_path)[1].lower()
+    tmp = f"{file_path}.fixing{ext}"  # 保留扩展名让 ffmpeg 自动匹配容器
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", file_path, "-map", "0", "-c", "copy"]
+    for i in target:
+        codec_type, tb = streams[i]
+        tb_num, tb_den = (int(x) for x in tb.split('/'))
+        # 表达式在包的 tick 时间基内求值: ms → tick 换算, 逗号需转义。
+        # 阈值取"跳变后的第一个包位置 - 10s 容差": 既不会平移跳变前最后一包
+        # (否则该包变负被 muxer 整体偏移), 也覆盖 B 帧 pts 乱序越过边界的抖动
+        thr = round((ref_at + ref_jump - 10_000) * tb_den / tb_num / 1000)
+        shift = round(ref_jump * tb_den / tb_num / 1000)
+        expr_pts = f"if(gte(PTS\\,{thr})\\,PTS-{shift}\\,PTS)"
+        expr_dts = f"if(gte(DTS\\,{thr})\\,DTS-{shift}\\,DTS)"
+        flag = "-bsf:v" if codec_type == 'video' else "-bsf:a"
+        cmd += [flag, f"setts=pts={expr_pts}:dts={expr_dts}"]
+    cmd.append(tmp)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
+                                startupinfo=get_startup_info(os_type))
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is None or result.returncode != 0:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        logger.warning(f"时间戳自动修复执行失败, 保留原文件: {file_path}")
+        return False
+    fixed_dur = duration_of(tmp)
+    # 修复后时长应比原时长回落约一个跳变量(容差 20%), 且为正; 不满足则放弃替换
+    if fixed_dur <= 0 or fixed_dur >= orig_dur - ref_jump / 1000 * 0.8:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        logger.warning(f"时间戳自动修复校验未通过({fixed_dur:.1f}s vs {orig_dur:.1f}s), 保留原文件: {file_path}")
+        return False
+    try:
+        os.replace(tmp, file_path)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        logger.warning(f"时间戳自动修复替换失败: {e}")
+        return False
+    logger.warning(f"时间戳自动修复完成: {file_path} 时长 {orig_dur:.1f}s -> {fixed_dur:.1f}s")
+    return True
 
 
 _resolution_scanned = {}  # path -> (size, mtime): 已扫描文件记录, 分段重扫时跳过未变化的
@@ -393,18 +525,35 @@ def _report_resolution_changes(file_path: str, record_name: str) -> None:
     if detect_resolution_change:
         resolutions = analyze_resolution_changes(file_path)
         if len(resolutions) > 1:
+            # 容器差异: MKV/MP4 头只存一套参数, 中段换分辨率会导致硬解/部分
+            # 播放器花屏; TS/FLV 可携带多套参数, 通常能正常播放, 属良性变化
+            benign = os.path.splitext(file_path)[1].lower() in ('.ts', '.flv', '.mpegts')
+            note = "通常可正常播放(容器支持多套参数)" if benign else "可能花屏(容器不支持中段参数变化)"
             color_obj.print_colored(
                 f"[{record_name}] 检测到分辨率变化({len(resolutions)}种): "
-                f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}",
+                f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}, {note}",
                 color_obj.YELLOW)
-            logger.warning(f"分辨率变化检测: {file_path} 出现过 {resolutions}")
+            logger.warning(f"分辨率变化检测({'良性' if benign else '可能花屏'}): "
+                           f"{file_path} 出现过 {resolutions}")
     if detect_pts_jumps_enabled:
-        jump = detect_pts_jumps(file_path)
-        if jump:
+        jumps = _scan_pts_jumps(file_path)
+        if jumps:
+            jump_at, jump, _tail_safe = max(jumps.values(), key=lambda item: item[1])
+            message = _format_jump(jump_at, jump)
             color_obj.print_colored(
-                f"[{record_name}] 检测到时间戳跳变: {jump} 文件: {os.path.basename(file_path)}",
+                f"[{record_name}] 检测到时间戳跳变: {message} 文件: {os.path.basename(file_path)}",
                 color_obj.YELLOW)
-            logger.warning(f"PTS 跳变检测: {file_path} {jump}")
+            logger.warning(f"PTS 跳变检测: {file_path} {message}")
+            if auto_repair_pts_jumps:
+                if repair_pts_jumps(file_path, jumps):
+                    color_obj.print_colored(
+                        f"[{record_name}] 时间戳跳变已自动修复: {os.path.basename(file_path)}",
+                        color_obj.GREEN)
+                else:
+                    color_obj.print_colored(
+                        f"[{record_name}] 时间戳跳变自动修复未执行(不满足条件或失败), "
+                        f"详情见日志: {os.path.basename(file_path)}",
+                        color_obj.YELLOW)
 
 
 def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> None:
@@ -2072,6 +2221,8 @@ while True:
         read_config_value(config, '录制设置', '录制完成后检测分辨率变化(是/否)', "是"), False)
     detect_pts_jumps_enabled = options.get(
         read_config_value(config, '录制设置', '录制完成后检测时间戳跳变(是/否)', "是"), False)
+    auto_repair_pts_jumps = options.get(
+        read_config_value(config, '录制设置', '检测到时间戳跳变后自动修复(是/否)', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
     create_time_file = options.get(read_config_value(config, '录制设置', '生成时间字幕文件', "否"), False)

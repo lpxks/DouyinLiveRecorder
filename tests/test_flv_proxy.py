@@ -91,18 +91,6 @@ class VideoTagStateTest(unittest.TestCase):
         # 触发后标志复位
         self.assertFalse(self.proxy._pending_segment)
 
-    def test_min_segment_interval_blocks_rapid_segments(self):
-        """节流: 距上次分段不足 min_segment_interval 时, 不触发(保留标记延迟分段)。"""
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x02" * 8)[15:])
-        # 第一次触发(记录 _last_segment_at)
-        with self.assertRaises(SegmentRequired):
-            self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, NALU)[15:])
-        # 再次标记 + 关键帧, 间隔不足 → 不触发, 标记保留
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x03" * 8)[15:])
-        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, NALU)[15:])  # 不应抛
-        self.assertTrue(self.proxy._pending_segment)
-
     def test_interframe_does_not_trigger(self):
         """标记后非关键帧不触发。"""
         self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])

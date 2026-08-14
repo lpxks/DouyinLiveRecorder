@@ -10,11 +10,17 @@
   (分段点在 GOP 边界, 两个文件各自可独立解码、无缝拼接)
 - 对 ffmpeg 完全透明: 断连 = EOF, ffmpeg 正常收尾
 时间戳归一化是本地扩展(bililive-go 无此处理)。
+
+已知取舍:
+- 旧文件尾部会保留"新 SPS + 一个按新参数编码的关键帧"(先转发关键帧再断连,
+  关键帧数据不丢): ffmpeg 系播放器可解, 只读容器头的硬解播放器可能在该单帧
+  花屏, 属可接受的尾部瑕疵; 新文件的参数完全正确。
+- 代理仅覆盖 FLV 源(抖音/TikTok 等): HLS(m3u8)/直录 TS/MKV 路径没有实时
+  分段能力, 中段参数变化只能靠录制后的 analyze_resolution_changes 检测告警。
 """
 
 import socket
 import threading
-import time
 
 import httpx
 
@@ -117,12 +123,11 @@ class FLVProxy:
     MAX_FORWARD_GAP_MS = 10_000
 
     def __init__(self, upstream_url: str, headers: dict | None = None,
-                 proxy_addr: str | None = None, min_segment_interval: float = 10.0,
+                 proxy_addr: str | None = None,
                  max_forward_gap_ms: int = MAX_FORWARD_GAP_MS):
         self.upstream_url = upstream_url
         self.headers = headers or {}
         self.proxy_addr = proxy_addr
-        self.min_segment_interval = min_segment_interval
         self.max_forward_gap_ms = max_forward_gap_ms
 
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -136,7 +141,6 @@ class FLVProxy:
         self._avc_header_count = 0
         self._first_sps: bytes | None = None  # 首个 SPS/PPS body, 用于比对参数是否真的变化
         self._pending_segment = False
-        self._last_segment_at = 0.0
         self._client_conn = None  # 到 ffmpeg 的连接, 用于强制断连
 
         self._thread: threading.Thread | None = None
@@ -255,14 +259,14 @@ class FLVProxy:
     # ---------- 解析与转发 ----------
 
     def _parse_and_forward(self, src, dst) -> None:
-        # 每个新连接(新文件)重置计数与节流起点: 节流只防同一连接内快速连续
-        # 触发, 新文件的真实参数变化不应被上一个文件的节流窗口压住(否则
-        # 新文件会混入两段参数=花屏); 相同 SPS 重发已由内容比对过滤
+        # 每个新连接(新文件)重置计数: 新文件的真实参数变化必须立即分段, 否则
+        # 新文件会混入两段参数=花屏(容器头只能存一套参数)。这里不设跨连接节流:
+        # 分段时间歇性快速连续(如分辨率 A↔B 来回切换)会切出多个小文件, 但这是
+        # "优先保证不花屏"的有意取舍; 相同 SPS 重发已由内容比对过滤
         with self._lock:
             self._avc_header_count = 0
             self._first_sps = None
             self._pending_segment = False
-            self._last_segment_at = 0.0
         # 时间戳归一化状态是每连接局部变量(连接并发时各时间轴互不污染)
         last_ts: int | None = None
         ts_offset = 0
@@ -330,10 +334,8 @@ class FLVProxy:
             with self._lock:
                 if not self._pending_segment:
                     return
-                # monotonic: 系统时钟回拨(NTP 校准/手动改时)不会冻结节流窗口
-                if time.monotonic() - self._last_segment_at < self.min_segment_interval:
-                    # 距上次分段过近(同一连接内快速连续变化): 保留标记, 等下个关键帧延迟分段
-                    return
-                self._last_segment_at = time.monotonic()
+                # 参数确实变化且遇到关键帧: 立即分段(优先保证不花屏)。不设节流——
+                # 分段后本连接即关闭, 跨连接的快速连续变化由上层断流重试节奏自然
+                # 错开, 此处节流会压住新文件的真实参数变化导致花屏
                 self._pending_segment = False
             raise SegmentRequired()
