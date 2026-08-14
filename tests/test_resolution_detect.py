@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -38,7 +39,8 @@ def load_detect_pts_jumps():
     """从 main.py 提取 detect_pts_jumps + get_startup_info 的真实源码执行。"""
     main_py = Path(__file__).resolve().parents[1] / 'main.py'
     tree = ast.parse(main_py.read_text(encoding='utf-8'))
-    namespace = {'shutil': shutil, 'subprocess': subprocess, 'os_type': os.name, 'os': os}
+    namespace = {'shutil': shutil, 'subprocess': subprocess, 'os_type': os.name,
+                 'os': os, 'threading': threading}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in ('detect_pts_jumps',
                                                                'get_startup_info'):

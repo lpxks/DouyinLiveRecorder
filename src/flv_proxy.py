@@ -1,8 +1,8 @@
 """FLV 流透明代理:检测 AVC sequence header(SPS/PPS)二次出现——即分辨率/编码参数
 切换——并在下一个关键帧处关闭到 ffmpeg 的连接, 让 ffmpeg 读到 EOF 自然收尾当前
 文件; 由上层录制循环重开新文件(新容器头, 参数正确), 避免"参数变化后永久花屏"。
-同时归一化上游时间戳向前跳变(CDN 缓冲/推流时钟切换常在流中段或结尾发出大幅
-超前的时间戳), 否则跳变直接透传会吃进文件 duration(MKV duration = 最后 PTS -
+同时归一化上游时间戳跳变(CDN 缓冲/推流时钟切换常在流中段或结尾发出大幅超前
+或回退的时间戳), 否则跳变直接透传会吃进文件 duration(MKV duration = 最后 PTS -
 第一 PTS), 导致"20 分钟视频显示 2 小时"的时长虚高。
 
 参考 bililive-go src/pkg/flvproxy/proxy.go 的实现:
@@ -33,13 +33,15 @@ class SegmentRequired(Exception):
 
 def normalize_tag_timestamp(tag_header: bytes, last_ts: int | None, ts_offset: int,
                             max_forward_gap_ms: int) -> tuple[bytes, int | None, int]:
-    """归一化上游时间戳向前跳变, 返回(重写后的 tag 头, 新 last_ts, 新偏移)。
+    """归一化上游时间戳跳变, 返回(重写后的 tag 头, 新 last_ts, 新偏移)。
 
-    CDN 缓冲/推流时钟切换会在流中段或结尾发出时间戳大幅超前的 tag,
+    CDN 缓冲/推流时钟切换会在流中段或结尾发出时间戳大幅超前或回退的 tag,
     直接透传会吃进文件 duration, 导致录制时长虚高(如 20 分钟显示 2 小时)。
-    检测到跳变时吸收偏移量并重写后续 tag 时间戳, 使时间轴连续; 内容字节
-    不变, 只有 4 字节时间戳被修正。向后跳变(时间戳回退)ffmpeg 自身会钳制
-    (实测验证), 这里原样放行。
+    向前跳变检测到后吸收偏移量并重写后续 tag 时间戳, 使时间轴连续; 内容字节
+    不变, 只有 4 字节时间戳被修正。大幅向后跳变(上游时间轴整体重置, 如推流端
+    重启/时钟切换)对称处理: 按新时间轴重新基准, 时间轴在上一 tag 之后继续连续
+    推进——若沿用旧偏移, 新时间轴一旦越过旧偏移量会被错误重写, 代理自造反向
+    跳变(时间轴重叠)。阈值内小幅回退原样放行, ffmpeg 自行钳制。
 
     状态由调用方持有(每个连接一份局部变量): 多连接并发时各时间轴互不污染。
     """
@@ -47,12 +49,21 @@ def normalize_tag_timestamp(tag_header: bytes, last_ts: int | None, ts_offset: i
     ts = (tag_header[11] << 24) | (tag_header[8] << 16) | (tag_header[9] << 8) | tag_header[10]
     adj = ts - ts_offset
     if last_ts is not None and adj - last_ts > max_forward_gap_ms:
+        # 向前跳变(CDN 缓冲/停滞恢复): 吸收偏移, 后续 tag 整体平移
         jump = adj - last_ts
         ts_offset += jump
         adj -= jump
         logger.warning(f"flv_proxy 上游时间戳向前跳变 +{jump}ms, 已归一化时间轴")
+    if last_ts is not None and last_ts - adj > max_forward_gap_ms:
+        # 大幅向后跳变 = 上游时间轴整体重置: 按新时间轴重新基准(与向前跳变对称
+        # 地吸收重置缺口, 时间轴接在上一 tag 之后连续推进); 若保留旧 ts_offset,
+        # 新时间轴越过旧偏移后会被重写成小值, 代理自造反向跳变(时间轴重叠)
+        jump = last_ts - adj
+        ts_offset = ts - (last_ts + 1)
+        adj = last_ts + 1
+        logger.warning(f"flv_proxy 上游时间戳向后跳变 -{jump}ms, 已重新基准时间轴")
     if adj < 0:
-        # 跳变吸收后时间轴回退(如上游整体重启): 不动原字节, ffmpeg 自行钳制
+        # 阈值内小幅回退等边缘情形: 不动原字节, ffmpeg 自行钳制
         return tag_header, last_ts, ts_offset
     if adj == ts:
         return tag_header, adj, ts_offset

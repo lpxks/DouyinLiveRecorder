@@ -53,6 +53,7 @@ class VideoTagStateTest(unittest.TestCase):
 
     def setUp(self):
         self.proxy = FLVProxy("http://127.0.0.1:1/x.flv")
+        self.addCleanup(self.proxy.close)  # 关闭监听 socket, 避免 ResourceWarning
         self.proxy._avc_header_count = 0
         self.proxy._pending_segment = False
 
@@ -166,12 +167,29 @@ class TimestampNormalizeTest(unittest.TestCase):
         h, _, off = self.norm(self.header_with_ts(24050), 24000, 0)
         self.assertEqual((parse_tag_ts(h), off), (24050, 0))
 
-    def test_backward_ts_passed_through(self):
-        """时间戳回退原样放行(ffmpeg 自行钳制, 实测不膨胀时长)。"""
-        orig = self.header_with_ts(1000)
-        h, last, off = self.norm(orig, 24000, 30000)
-        self.assertEqual(h, orig)
-        self.assertEqual((last, off), (24000, 30000))  # 状态不被回退破坏
+    def test_backward_timeline_reset_rebased(self):
+        """大幅向后跳变(时间轴整体重置): 与向前跳变对称地吸收, 时间轴接在上一 tag 后连续。"""
+        h, last, off = self.norm(self.header_with_ts(1000), 24000, 30000)
+        self.assertEqual(parse_tag_ts(h), 24001)
+        self.assertEqual(last, 24001)
+        # 后续 tag 保持内部间隔继续推进
+        h2, last2, _ = self.norm(self.header_with_ts(1100), last, off)
+        self.assertEqual((parse_tag_ts(h2), last2), (24101, 24101))
+
+    def test_reset_after_forward_absorb_stays_continuous(self):
+        """P1 回归: 吸收向前跳变后上游时间轴整体重置, 新时间轴逐 tag 推进越过旧偏移,
+        转发时间轴应连续递增——旧实现会自造 -29950ms 的反向跳变(时间轴重叠)。"""
+        _, last, off = self.norm(self.header_with_ts(24050), 24000, 0)
+        _, last, off = self.norm(self.header_with_ts(54000), last, off)  # 吸收 +29950
+        self.assertEqual((last, off), (24050, 29950))
+        h, last, off = self.norm(self.header_with_ts(0), last, off)  # 时间轴重置
+        self.assertEqual(parse_tag_ts(h), 24051)
+        self.assertEqual(last, 24051)
+        prev = 24051
+        for ts in range(100, 30001, 100):  # 新时间轴越过旧偏移 29950
+            h, last, off = self.norm(self.header_with_ts(ts), last, off)
+            self.assertEqual(parse_tag_ts(h), prev + 100, f"ts={ts} 处时间轴断裂")
+            prev = parse_tag_ts(h)
 
     def test_high_timestamp_ext_byte_written(self):
         """超过 24 位的值正确读写 ts_ext 字节。"""
@@ -312,7 +330,8 @@ class TimestampNormalizeEndToEndTest(unittest.TestCase):
             capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             raise RuntimeError(r.stderr)
-        cls.stream_data = _shift_flv_timestamps(open(src, "rb").read(), 25000, 30000)
+        with open(src, "rb") as f:
+            cls.stream_data = _shift_flv_timestamps(f.read(), 25000, 30000)
 
         class FlvSource(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

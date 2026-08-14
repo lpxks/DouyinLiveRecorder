@@ -312,46 +312,64 @@ def detect_pts_jumps(file_path: str) -> str | None:
     按流分别追踪时间轴(音视频时间轴基差是常见现象, 跨流比较会误报),
     相邻包间隔超过 5 分钟即判定跳变——直播录制中同流相邻包不会出现这么
     大的正常间隔, 再小的跳变(如 230s)播放时也有明显卡帧。
-    小文件全包扫描; 大文件只扫关键帧(跳变通常伴随 GOP 边界), 秒级完成。
+    packet 级扫描只解复用不解码, 大文件也很快; 此前大文件走 -skip_frame nokey
+    只解关键帧, 关键帧之间发生的跳变会漏检(坏 ts_ext tag 通常是普通帧)。
+    超长文件全包 csv 可达数百 MB, stdout 由读线程逐行增量解析, 不整块缓冲。
     """
     if shutil.which("ffprobe") is None:
         return None
+    args = ["ffprobe", "-v", "error",
+            "-show_entries", "packet=pts_time,stream_index", "-of", "csv=p=0", file_path]
     try:
-        size = os.path.getsize(file_path)
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, startupinfo=get_startup_info(os_type))
     except OSError:
         return None
-    if size <= 8 * 1024 * 1024:
-        args = ["ffprobe", "-v", "error",
-                "-show_entries", "packet=pts_time,stream_index", "-of", "csv=p=0", file_path]
-    else:
-        args = ["ffprobe", "-v", "error", "-skip_frame", "nokey",
-                "-show_entries", "frame=pts_time,stream_index", "-of", "csv=p=0", file_path]
-    try:
-        result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=120, startupinfo=get_startup_info(os_type))
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    prev = {}  # stream_index -> 上一个 pts(按流分别追踪)
-    max_jump = 0.0
-    jump_at = None
-    for line in result.stdout.splitlines():
-        parts = line.split(',')
-        if len(parts) < 2:
-            continue
+
+    result = {}
+
+    def parse_stream() -> None:
+        # 逐行增量解析: 只保留每个流的上一个 pts + 最大跳变, 内存 O(流数)
+        prev = {}  # stream_index -> 上一个 pts(按流分别追踪)
+        max_jump = 0.0
+        jump_at = None
         try:
-            stream_index = int(parts[0])
-            pts = float(parts[1])
-        except ValueError:
-            continue
-        if stream_index in prev and pts - prev[stream_index] > 300:
-            if pts - prev[stream_index] > max_jump:
-                max_jump = pts - prev[stream_index]
-                jump_at = prev[stream_index]
-        prev[stream_index] = pts
+            for line in process.stdout:
+                parts = line.split(',')
+                if len(parts) < 2:
+                    continue
+                try:
+                    stream_index = int(parts[0])
+                    pts = float(parts[1])
+                except ValueError:
+                    continue
+                if stream_index in prev and pts - prev[stream_index] > 300:
+                    if pts - prev[stream_index] > max_jump:
+                        max_jump = pts - prev[stream_index]
+                        jump_at = prev[stream_index]
+                prev[stream_index] = pts
+        except (OSError, ValueError):
+            pass
+        result['max_jump'] = max_jump
+        result['jump_at'] = jump_at
+
+    # 读线程与 wait 并发: 主线程限时 120s(ffprobe 卡死时 kill), 读线程消费
+    # stdout 防止管道写满阻塞 ffprobe
+    reader = threading.Thread(target=parse_stream, daemon=True,
+                              name=f"pts-scan-{os.path.basename(file_path)}")
+    reader.start()
+    try:
+        process.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return None
+    reader.join(timeout=10)
+    if process.returncode != 0:
+        return None
+    jump_at = result.get('jump_at')
     if jump_at is None:
         return None
+    max_jump = result.get('max_jump', 0.0)
     if max_jump >= 3600:
         human = f"{max_jump / 3600:.1f} 小时"
     else:
@@ -372,19 +390,21 @@ def _report_resolution_changes(file_path: str, record_name: str) -> None:
     if len(_resolution_scanned) > 500:
         _resolution_scanned.clear()  # 防无限增长, 长期运行只保留近期记录
     _resolution_scanned[file_path] = key
-    resolutions = analyze_resolution_changes(file_path)
-    if len(resolutions) > 1:
-        color_obj.print_colored(
-            f"[{record_name}] 检测到分辨率变化({len(resolutions)}种): "
-            f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}",
-            color_obj.YELLOW)
-        logger.warning(f"分辨率变化检测: {file_path} 出现过 {resolutions}")
-    jump = detect_pts_jumps(file_path)
-    if jump:
-        color_obj.print_colored(
-            f"[{record_name}] 检测到时间戳跳变: {jump} 文件: {os.path.basename(file_path)}",
-            color_obj.YELLOW)
-        logger.warning(f"PTS 跳变检测: {file_path} {jump}")
+    if detect_resolution_change:
+        resolutions = analyze_resolution_changes(file_path)
+        if len(resolutions) > 1:
+            color_obj.print_colored(
+                f"[{record_name}] 检测到分辨率变化({len(resolutions)}种): "
+                f"{' → '.join(resolutions)} 文件: {os.path.basename(file_path)}",
+                color_obj.YELLOW)
+            logger.warning(f"分辨率变化检测: {file_path} 出现过 {resolutions}")
+    if detect_pts_jumps_enabled:
+        jump = detect_pts_jumps(file_path)
+        if jump:
+            color_obj.print_colored(
+                f"[{record_name}] 检测到时间戳跳变: {jump} 文件: {os.path.basename(file_path)}",
+                color_obj.YELLOW)
+            logger.warning(f"PTS 跳变检测: {file_path} {jump}")
 
 
 def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> None:
@@ -625,10 +645,12 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
     else:
         color_obj.print_colored(f"\n{record_name} {stop_time} 直播录制出错,返回码: {return_code}\n", color_obj.RED)
 
-    # 录制后兜底检测分辨率变化(线程内跑, 不阻塞重试/转码):
-    # 正常结束与断流/分段文件都扫——断流文件在直录/HLS 等不走 FLV 代理的路径下
-    # 可能混入多段参数, 这是 flv_proxy 实时分段覆盖不到的
-    if detect_resolution_change and save_file_path.endswith(('.ts', '.flv', '.mkv', '.mp4')):
+    # 录制后兜底检测(线程内跑, 不阻塞重试/转码): 分辨率变化与 PTS 跳变是两套
+    # 独立检测, 各自受配置开关控制; 正常结束与断流/分段文件都扫——断流文件在
+    # 直录/HLS 等不走 FLV 代理的路径下可能混入多段参数, 这是 flv_proxy 实时
+    # 分段覆盖不到的
+    if (detect_resolution_change or detect_pts_jumps_enabled) \
+            and save_file_path.endswith(('.ts', '.flv', '.mkv', '.mp4')):
         threading.Thread(target=check_resolution_changes,
                          args=(save_file_path, record_name), daemon=True).start()
 
@@ -2048,6 +2070,8 @@ while True:
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     detect_resolution_change = options.get(
         read_config_value(config, '录制设置', '录制完成后检测分辨率变化(是/否)', "是"), False)
+    detect_pts_jumps_enabled = options.get(
+        read_config_value(config, '录制设置', '录制完成后检测时间戳跳变(是/否)', "是"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
     create_time_file = options.get(read_config_value(config, '录制设置', '生成时间字幕文件', "否"), False)

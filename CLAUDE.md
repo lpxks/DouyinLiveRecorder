@@ -48,7 +48,11 @@ URL_config.ini → main.py (orchestration loop)
   → msg_push.py (push start/stop notifications via DingTalk/Telegram/Email/Bark/ntfy/PushPlus)
 ```
 
-Note: `StreamCap/` in the repo root is a git-ignored copy of the sibling StreamCap project (see README "相关项目") — not part of this codebase; don't read or modify it as if it were.
+Note: The repo-root dirs `StreamCap/`, `biliLive-tools/`, `bililive-go/` are git-ignored reference projects (see README "相关项目") — not part of this codebase; the user may `git pull` them at any time, so don't modify, commit, or import from them. **Each directory carries its own `CLAUDE.md`** (structure snapshot, also subject to drift) — when you need to go deep into one of them, dispatch a sub-agent to read that directory's `CLAUDE.md` first, then the code. One-line navigation below:
+
+- **`StreamCap/`** — sibling recorder project (Flet desktop/web, JSON config); borrowed from for overall architecture (platform handlers, ffmpeg builders).
+- **`biliLive-tools/`** — Bilibili live-recording/post-processing tool (TS monorepo); post-processing (resolution-change detection via ffprobe, merge/transcode) lives in `packages/shared/src/task/video.ts` — no `native/`/`parser/` dirs.
+- **`bililive-go/`** — Go live-recorder; `src/pkg/flvproxy/proxy.go` is the reference implementation for FLV auto-segmentation on resolution/parameter change — our `src/flv_proxy.py` is ported from it.
 
 ### Key modules
 
