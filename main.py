@@ -310,8 +310,9 @@ def detect_pts_jumps(file_path: str) -> str | None:
     上游 CDN 偶发发出 ts_ext 字节异常的 tag(如 0xFF → 解析为 2^32ms≈49.7 天),
     经 ffmpeg 写入文件后 duration 严重虚高(几 KB 文件显示上千小时)。
     按流分别追踪时间轴(音视频时间轴基差是常见现象, 跨流比较会误报),
-    相邻包间隔超过 1 小时即判定跳变。小文件全包扫描; 大文件只扫关键帧
-    (跳变通常伴随 GOP 边界), 秒级完成。
+    相邻包间隔超过 5 分钟即判定跳变——直播录制中同流相邻包不会出现这么
+    大的正常间隔, 再小的跳变(如 230s)播放时也有明显卡帧。
+    小文件全包扫描; 大文件只扫关键帧(跳变通常伴随 GOP 边界), 秒级完成。
     """
     if shutil.which("ffprobe") is None:
         return None
@@ -319,7 +320,7 @@ def detect_pts_jumps(file_path: str) -> str | None:
         size = os.path.getsize(file_path)
     except OSError:
         return None
-    if size <= 2 * 1024 * 1024:
+    if size <= 8 * 1024 * 1024:
         args = ["ffprobe", "-v", "error",
                 "-show_entries", "packet=pts_time,stream_index", "-of", "csv=p=0", file_path]
     else:
@@ -344,14 +345,18 @@ def detect_pts_jumps(file_path: str) -> str | None:
             pts = float(parts[1])
         except ValueError:
             continue
-        if stream_index in prev and pts - prev[stream_index] > 3600:
+        if stream_index in prev and pts - prev[stream_index] > 300:
             if pts - prev[stream_index] > max_jump:
                 max_jump = pts - prev[stream_index]
                 jump_at = prev[stream_index]
         prev[stream_index] = pts
     if jump_at is None:
         return None
-    return f"{jump_at:.1f}s 处 PTS 跳变 +{max_jump / 3600:.1f} 小时, 时长虚高约 {max_jump / 3600:.1f} 小时"
+    if max_jump >= 3600:
+        human = f"{max_jump / 3600:.1f} 小时"
+    else:
+        human = f"{max_jump / 60:.0f} 分钟"
+    return f"{jump_at:.1f}s 处 PTS 跳变 +{human}, 时长虚高约 {human}"
 
 
 _resolution_scanned = {}  # path -> (size, mtime): 已扫描文件记录, 分段重扫时跳过未变化的

@@ -157,6 +157,14 @@ class PtsJumpDetectTest(unittest.TestCase):
         self.assertIsNotNone(result, '尾部 2 小时跳变应被检出')
         self.assertIn('2.0 小时', result)
 
+    def test_minute_level_jump_detected(self):
+        """+10 分钟跳变(播放卡 10 分钟)也应检出, 提示用分钟格式。"""
+        jumped = shift_flv_timestamps(self.src_data, 25000, 10 * 60 * 1000)
+        mkv = self.record_mkv(jumped, 'jump10m')
+        result = DETECT_PTS_JUMPS(mkv)
+        self.assertIsNotNone(result, '尾部 10 分钟跳变应被检出')
+        self.assertIn('10 分钟', result)
+
 
 if __name__ == '__main__':
     unittest.main()
