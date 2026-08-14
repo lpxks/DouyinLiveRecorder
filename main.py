@@ -309,8 +309,9 @@ def detect_pts_jumps(file_path: str) -> str | None:
 
     上游 CDN 偶发发出 ts_ext 字节异常的 tag(如 0xFF → 解析为 2^32ms≈49.7 天),
     经 ffmpeg 写入文件后 duration 严重虚高(几 KB 文件显示上千小时)。
-    小文件全包扫描; 大文件只扫关键帧(跳变通常伴随 GOP 边界), 秒级完成。
-    阈值 1 小时: 直播连续时间轴中相邻包不会出现这么大的正常间隔。
+    按流分别追踪时间轴(音视频时间轴基差是常见现象, 跨流比较会误报),
+    相邻包间隔超过 1 小时即判定跳变。小文件全包扫描; 大文件只扫关键帧
+    (跳变通常伴随 GOP 边界), 秒级完成。
     """
     if shutil.which("ffprobe") is None:
         return None
@@ -319,12 +320,11 @@ def detect_pts_jumps(file_path: str) -> str | None:
     except OSError:
         return None
     if size <= 2 * 1024 * 1024:
-        args = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "packet=pts_time", "-of", "csv=p=0", file_path]
+        args = ["ffprobe", "-v", "error",
+                "-show_entries", "packet=pts_time,stream_index", "-of", "csv=p=0", file_path]
     else:
         args = ["ffprobe", "-v", "error", "-skip_frame", "nokey",
-                "-select_streams", "v:0",
-                "-show_entries", "frame=pts_time", "-of", "csv=p=0", file_path]
+                "-show_entries", "frame=pts_time,stream_index", "-of", "csv=p=0", file_path]
     try:
         result = subprocess.run(args, capture_output=True, text=True,
                                 timeout=120, startupinfo=get_startup_info(os_type))
@@ -332,19 +332,23 @@ def detect_pts_jumps(file_path: str) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    prev = None
+    prev = {}  # stream_index -> 上一个 pts(按流分别追踪)
     max_jump = 0.0
     jump_at = None
     for line in result.stdout.splitlines():
+        parts = line.split(',')
+        if len(parts) < 2:
+            continue
         try:
-            pts = float(line)
+            stream_index = int(parts[0])
+            pts = float(parts[1])
         except ValueError:
             continue
-        if prev is not None and pts - prev > 3600:
-            if pts - prev > max_jump:
-                max_jump = pts - prev
-                jump_at = prev
-        prev = pts
+        if stream_index in prev and pts - prev[stream_index] > 3600:
+            if pts - prev[stream_index] > max_jump:
+                max_jump = pts - prev[stream_index]
+                jump_at = prev[stream_index]
+        prev[stream_index] = pts
     if jump_at is None:
         return None
     return f"{jump_at:.1f}s 处 PTS 跳变 +{max_jump / 3600:.1f} 小时, 时长虚高约 {max_jump / 3600:.1f} 小时"
