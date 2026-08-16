@@ -56,6 +56,23 @@ def _extract_inband_sps(data: bytes) -> bytes | None:
     return bytes(sps) if sps else None
 
 
+def _extract_seq_sps(data: bytes) -> bytes | None:
+    """从 AVC sequence header tag 数据中解出首个 SPS NAL 字节, 失败返回 None。
+
+    数据布局: 帧类型/编码(1) + AVCPacketType(1) + AVCDecoderConfigurationRecord
+    (第 5 字节低 5 位 = SPS 数量, 随后 2 字节大端长度 + SPS 数据)。
+    """
+    if len(data) < 11:
+        return None
+    num_sps = data[7] & 0x1F
+    if num_sps < 1:
+        return None
+    sps_len = int.from_bytes(data[8:10], 'big')
+    if sps_len < 1 or 10 + sps_len > len(data):
+        return None
+    return bytes(data[10:10 + sps_len])
+
+
 class _BufferedStream:
     """按需读取包装:httpx iter_bytes 是分块产出, 解析需要精确按 N 字节读。"""
 
@@ -113,6 +130,7 @@ class FLVProxy:
         # 首个 sequence header 与首个带内 SPS 作为参数基线, 后续内容比对
         self._avc_header_count = 0
         self._first_seq_header: bytes | None = None
+        self._first_seq_sps: bytes | None = None  # 首个 seq header 里的 SPS, 用于带内 SPS 交叉校验
         self._first_inband_sps: bytes | None = None
         self._pending_segment = False
         self._client_conn = None  # 到 ffmpeg 的连接, 用于强制断连
@@ -239,6 +257,7 @@ class FLVProxy:
         with self._lock:
             self._avc_header_count = 0
             self._first_seq_header = None
+            self._first_seq_sps = None
             self._first_inband_sps = None
             self._pending_segment = False
 
@@ -297,6 +316,7 @@ class FLVProxy:
                 self._avc_header_count += 1
                 if self._avc_header_count == 1:
                     self._first_seq_header = bytes(data)
+                    self._first_seq_sps = _extract_seq_sps(data)
                 elif self._first_seq_header != data:
                     # 第二个且内容不同的 SPS/PPS = 分辨率/编码参数变化: 标记待分段
                     self._pending_segment = True
@@ -308,6 +328,11 @@ class FLVProxy:
             if inband is not None:
                 with self._lock:
                     if self._first_inband_sps is None:
+                        # 首个带内 SPS 与开流 seq header 的 SPS 交叉校验: 两者不同
+                        # 说明参数在基线建立前已变化(如变化后才开始内嵌 SPS 的
+                        # CDN), 立即标记分段而不是无条件当作基线
+                        if self._first_seq_sps is not None and inband != self._first_seq_sps:
+                            self._pending_segment = True
                         self._first_inband_sps = inband
                     elif inband != self._first_inband_sps:
                         self._pending_segment = True

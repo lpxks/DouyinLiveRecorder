@@ -1078,6 +1078,11 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         push_at = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                         if port_info['is_live'] is False:
                             print(f"\r{record_name} 等待直播... ")
+                            # 下播/离线时回收代理: 释放本地监听 socket 与 accept 线程,
+                            # 避免长挂机累积闲置代理; 下次开播会按新流地址重建
+                            if flv_proxy:
+                                flv_proxy.close()
+                                flv_proxy = None
 
                             if start_pushed:
                                 if over_show_push:

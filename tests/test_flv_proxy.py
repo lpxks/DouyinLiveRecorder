@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 
-from src.flv_proxy import FLVProxy, SegmentRequired, _extract_inband_sps
+from src.flv_proxy import FLVProxy, SegmentRequired, _extract_inband_sps, _extract_seq_sps
 
 # FLV 常量
 AVC = 7
@@ -37,6 +37,14 @@ def make_video_tag(frame_type: int, codec_id: int, avc_packet_type: int,
 def sps_nal(marker: int = 1) -> bytes:
     """构造一个假 SPS NAL(首字节 0x67 = NAL type 7)。"""
     return bytes([0x67, marker, 0, 0])
+
+
+def make_seq_header_payload(sps: bytes, pps: bytes = b"\x68\x01") -> bytes:
+    """构造合法的 AVCDecoderConfigurationRecord(seq header tag 的 data 区)。"""
+    rec = bytearray(b"\x01\x64\x00\x1f\xff\xe1")  # version/profile/compat/level/lengthSize/numSPS
+    rec += len(sps).to_bytes(2, "big") + sps
+    rec += bytes([0x01]) + len(pps).to_bytes(2, "big") + pps
+    return bytes(rec)
 
 
 def make_keyframe_payload(*nalus: bytes) -> bytes:
@@ -141,9 +149,35 @@ class VideoTagStateTest(unittest.TestCase):
         self.assertIsNone(self.proxy._first_inband_sps)
         self.assertFalse(self.proxy._pending_segment)
 
+    # ---------- 带内 SPS 与 seq header 的交叉校验(R1) ----------
+
+    def test_inband_sps_matching_seq_header_no_trigger(self):
+        """首个带内 SPS 与开流 seq header 的 SPS 一致: 建基线, 不触发。"""
+        self.proxy._check_video_tag(
+            make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=make_seq_header_payload(sps_nal(1)))[15:])
+        self.proxy._check_video_tag(
+            make_video_tag(KEYFRAME, AVC, NALU, payload=make_keyframe_payload(sps_nal(1)))[15:])
+        self.assertEqual(self.proxy._first_inband_sps, sps_nal(1))
+        self.assertFalse(self.proxy._pending_segment)
+
+    def test_inband_sps_differs_from_seq_header_triggers(self):
+        """首个带内 SPS 与 seq header 的 SPS 不同(参数在基线前已变化): 立即分段。"""
+        self.proxy._check_video_tag(
+            make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=make_seq_header_payload(sps_nal(1)))[15:])
+        with self.assertRaises(SegmentRequired):
+            self.proxy._check_video_tag(
+                make_video_tag(KEYFRAME, AVC, NALU, payload=make_keyframe_payload(sps_nal(2)))[15:])
+
+    def test_seq_header_without_parsable_sps_skips_cross_check(self):
+        """seq header 的 SPS 解不出来(畸形记录)时交叉校验跳过, 不影响基线逻辑。"""
+        self.proxy._check_video_tag(make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01" * 8)[15:])
+        self.proxy._check_video_tag(
+            make_video_tag(KEYFRAME, AVC, NALU, payload=make_keyframe_payload(sps_nal(1)))[15:])
+        self.assertFalse(self.proxy._pending_segment)
+
 
 class ExtractInbandSpsTest(unittest.TestCase):
-    """_extract_inband_sps 解析单元测试。"""
+    """_extract_inband_sps / _extract_seq_sps 解析单元测试。"""
 
     def test_extracts_sps_nal(self):
         payload = make_keyframe_payload(sps_nal(7), bytes([0x65, 1]))  # SPS + IDR
@@ -158,6 +192,20 @@ class ExtractInbandSpsTest(unittest.TestCase):
 
     def test_too_short_returns_none(self):
         self.assertIsNone(_extract_inband_sps(b"\x17\x01"))
+
+    def test_extract_seq_sps_valid(self):
+        tag = make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=make_seq_header_payload(sps_nal(3)))[15:]
+        self.assertEqual(_extract_seq_sps(tag), sps_nal(3))
+
+    def test_extract_seq_sps_truncated_none(self):
+        tag = make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=b"\x01\x64\x00")[15:]
+        self.assertIsNone(_extract_seq_sps(tag))
+
+    def test_extract_seq_sps_zero_sps_none(self):
+        # numSPS=0 的记录
+        payload = b"\x01\x64\x00\x1f\xff\xe0" + b"\x01" + b"\x00\x01\x68"
+        tag = make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=payload)[15:]
+        self.assertIsNone(_extract_seq_sps(tag))
 
 
 class IsFlvStreamTest(unittest.TestCase):
