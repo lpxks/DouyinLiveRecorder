@@ -59,18 +59,19 @@ def _extract_inband_sps(data: bytes) -> bytes | None:
 def _extract_seq_sps(data: bytes) -> bytes | None:
     """从 AVC sequence header tag 数据中解出首个 SPS NAL 字节, 失败返回 None。
 
-    数据布局: 帧类型/编码(1) + AVCPacketType(1) + AVCDecoderConfigurationRecord
-    (第 5 字节低 5 位 = SPS 数量, 随后 2 字节大端长度 + SPS 数据)。
+    数据布局: 帧类型/编码(1) + AVCPacketType(1) + CompositionTime(3) +
+    AVCDecoderConfigurationRecord(第 5 字节低 5 位 = SPS 数量, 随后 2 字节
+    大端长度 + SPS 数据)——注意 record 之前固定有 3 字节 CompositionTime。
     """
-    if len(data) < 11:
+    if len(data) < 13:
         return None
-    num_sps = data[7] & 0x1F
+    num_sps = data[10] & 0x1F
     if num_sps < 1:
         return None
-    sps_len = int.from_bytes(data[8:10], 'big')
-    if sps_len < 1 or 10 + sps_len > len(data):
+    sps_len = int.from_bytes(data[11:13], 'big')
+    if sps_len < 1 or 13 + sps_len > len(data):
         return None
-    return bytes(data[10:10 + sps_len])
+    return bytes(data[13:13 + sps_len])
 
 
 class _BufferedStream:

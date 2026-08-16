@@ -40,11 +40,14 @@ def sps_nal(marker: int = 1) -> bytes:
 
 
 def make_seq_header_payload(sps: bytes, pps: bytes = b"\x68\x01") -> bytes:
-    """构造合法的 AVCDecoderConfigurationRecord(seq header tag 的 data 区)。"""
+    """构造 AVC seq header tag 的 data 区: CompositionTime(3) + AVCDecoderConfigurationRecord。
+
+    注意真实 FLV 的 seq header 与 NALU tag 一样, 在记录之前固定带 3 字节 CompositionTime。
+    """
     rec = bytearray(b"\x01\x64\x00\x1f\xff\xe1")  # version/profile/compat/level/lengthSize/numSPS
     rec += len(sps).to_bytes(2, "big") + sps
     rec += bytes([0x01]) + len(pps).to_bytes(2, "big") + pps
-    return bytes(rec)
+    return b"\x00\x00\x00" + bytes(rec)
 
 
 def make_keyframe_payload(*nalus: bytes) -> bytes:
@@ -202,8 +205,8 @@ class ExtractInbandSpsTest(unittest.TestCase):
         self.assertIsNone(_extract_seq_sps(tag))
 
     def test_extract_seq_sps_zero_sps_none(self):
-        # numSPS=0 的记录
-        payload = b"\x01\x64\x00\x1f\xff\xe0" + b"\x01" + b"\x00\x01\x68"
+        # numSPS=0 的记录(带 CompositionTime 前缀)
+        payload = b"\x00\x00\x00" + b"\x01\x64\x00\x1f\x00\xe0" + b"\x01" + b"\x00\x01\x68"
         tag = make_video_tag(KEYFRAME, AVC, SEQ_HEADER, payload=payload)[15:]
         self.assertIsNone(_extract_seq_sps(tag))
 
