@@ -38,6 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
+from src.flv_proxy import FLVProxy
 from url_parser import dedup_priority_action, find_writeback_index, split_url_line
 
 version = "v4.0.7"
@@ -551,6 +552,8 @@ def select_source_url(link, stream_info):
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
 
+    flv_proxy = None  # FLV 流代理(检测编码参数变化自动分段), 跨轮复用
+
     while True:
         try:
             run_once = False
@@ -587,6 +590,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                 if record_url in url_comments:
                     print(f"[{record_name}]已被注释,本条线程将会退出")
                     clear_record_info(record_name, record_url)
+                    if flv_proxy:
+                        flv_proxy.close()
                     return
 
                 try:
@@ -1038,6 +1043,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                     else:
                         logger.error(f'{record_url} {platform}直播地址')
+                        if flv_proxy:
+                            flv_proxy.close()
                         return
 
                     if anchor_name:
@@ -1156,6 +1163,29 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     if platform in http_record_list:
                                         real_url = real_url.replace("https://", "http://")
 
+                                # FLV 流代理: 检测编码参数(SPS/PPS)变化自动分段,
+                                # 修复"前几分钟正常、后续全部花屏"(参数变化后新参数帧
+                                # 用旧容器头解码)。参考 bililive-go flvproxy。
+                                # 直录平台(shopee/花椒)不走 ffmpeg 拉流, 无需代理。
+                                if flv_proxy is not None and flv_proxy.upstream_url != real_url:
+                                    # 流地址已变化(如下播重开播/CDN 轮换): 重建代理指向新地址,
+                                    # 否则代理会一直用过期 URL 请求, 新直播永远录不上
+                                    flv_proxy.close()
+                                    flv_proxy = None
+                                if flv_proxy is None and platform not in ('shopee', '花椒直播') \
+                                        and FLVProxy.is_flv_stream(real_url):
+                                    proxy_header_str = get_record_headers(platform, record_url)
+                                    proxy_headers = {}
+                                    if proxy_header_str:
+                                        k, v = proxy_header_str.split(":", 1)
+                                        proxy_headers[k.strip()] = v.strip()
+                                    flv_proxy = FLVProxy(real_url, headers=proxy_headers,
+                                                         proxy_addr=proxy_address)
+                                    flv_proxy.start()
+                                if flv_proxy is not None:
+                                    show_real_url = real_url  # 日志用原始流地址(real_url 将被替换为 loopback)
+                                    real_url = flv_proxy.local_url
+
                                 user_agent = ("Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 ("
                                               "KHTML, like Gecko) SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile "
                                               "Safari/537.36")
@@ -1189,8 +1219,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-re", "-i", real_url,
                                     "-bufsize", bufsize,
                                     "-sn", "-dn",
-                                    "-reconnect_delay_max", "60",
-                                    "-reconnect_streamed", "-reconnect_at_eof",
+                                    # 参考 bililive-go: 不启用 ffmpeg 内置重连——断流后由
+                                    # 外层断流重试机制重开新文件(新容器头), 避免重连后
+                                    # 参数变化的流被写进同一文件导致后续全程花屏
                                     "-max_muxing_queue_size", max_muxing_queue_size,
                                     "-correct_ts_overflow", "1",
                                     "-avoid_negative_ts", "1",
@@ -1208,7 +1239,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     ffmpeg_command.insert(11, "-headers")
                                     ffmpeg_command.insert(12, headers)
 
-                                if proxy_address:
+                                if proxy_address and flv_proxy is None:
+                                    # 走 FLV 代理时不传 -http_proxy: -i 已是本地 127.0.0.1,
+                                    # 传给代理会把 loopback 也路由进用户代理导致录制失败
+                                    # (上游连接由代理自身的 proxy_addr 负责)
                                     ffmpeg_command.insert(1, "-http_proxy")
                                     ffmpeg_command.insert(2, proxy_address)
 
@@ -1224,7 +1258,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             f"{platform} | {anchor_name} | 直播源地址: {port_info.get('m3u8_url')}")
                                     else:
                                         logger.info(
-                                            f"{platform} | {anchor_name} | 直播源地址: {real_url}")
+                                            f"{platform} | {anchor_name} | 直播源地址: "
+                                            f"{show_real_url if flv_proxy else real_url}")
 
                                 only_flv_record = False
                                 only_flv_platform_list = ['shopee', '花椒直播']
@@ -1307,6 +1342,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1401,6 +1439,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1475,6 +1516,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1522,6 +1566,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             custom_script
                                         )
                                         if comment_end:
+                                            if flv_proxy:
+                                                flv_proxy.close()
+                                                flv_proxy = None
                                             return
 
                                     except subprocess.CalledProcessError as e:
@@ -1570,6 +1617,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                                 ).start()
                                                             except subprocess.CalledProcessError as e:
                                                                 logger.error(f"转码失败: {e} ")
+                                                if flv_proxy:
+                                                    flv_proxy.close()
+                                                    flv_proxy = None
                                                 return
 
                                         except subprocess.CalledProcessError as e:
@@ -1605,6 +1655,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 threading.Thread(
                                                     target=converts_mp4, args=(save_file_path, delete_origin_file)
                                                 ).start()
+                                                if flv_proxy:
+                                                    flv_proxy.close()
+                                                    flv_proxy = None
                                                 return
 
                                         except subprocess.CalledProcessError as e:
