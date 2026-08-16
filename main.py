@@ -1875,10 +1875,10 @@ while True:
             with open(url_config_file, 'r', encoding=text_encoding) as file:
                 ini_URL_content = file.read().strip()
 
-        if not ini_URL_content.strip():
-            input_url = input('请输入要录制的主播直播间网址（尽量使用PC网页端的直播间地址）:\n')
-            with open(url_config_file, 'w', encoding=text_encoding) as file:
-                file.write(input_url)
+        # if not ini_URL_content.strip():
+        #     input_url = input('请输入要录制的主播直播间网址（尽量使用PC网页端的直播间地址）:\n')
+        #     with open(url_config_file, 'w', encoding=text_encoding) as file:
+        #         file.write(input_url)
     except OSError as err:
         logger.error(f"发生 I/O 错误: {err}")
 
