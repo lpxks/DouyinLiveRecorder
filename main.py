@@ -549,6 +549,40 @@ def select_source_url(link, stream_info):
     return stream_info.get('record_url')
 
 
+# 一次性直播链接平台: 每次开播流地址都会变化, 旧链接在一次直播结束后即失效,
+# 断流重试耗尽后自动注释对应 URL_config.ini 行, 避免死链被无限轮询
+EPHEMERAL_LIVE_PLATFORMS = ('小红书直播', '淘宝直播')
+
+
+def find_comment_target_line(config_path: str, url: str) -> str | None:
+    """在 URL 配置文件中找到包含 url 且未被注释的活跃行, 返回去换行后的行文本。
+
+    找不到(不存在/已注释/读取失败)返回 None。
+    """
+    try:
+        with open(config_path, "r", encoding=text_encoding) as f:
+            for line in f:
+                if url in line and not line.lstrip().startswith('#'):
+                    return line.rstrip('\n')
+    except OSError:
+        return None
+    return None
+
+
+def _comment_ephemeral_link(record_name: str, record_url: str) -> None:
+    """断流重试耗尽后注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。"""
+    line = find_comment_target_line(url_config_file, record_url)
+    if line is None:
+        logger.warning(f"未找到可注释的活跃链接行(可能已被注释): {record_url}")
+        return
+    update_file(url_config_file, line, line, start_str='#')
+    color_obj.print_colored(
+        f"[{record_name}] 断流重试{max_retry_interrupted}次后仍失败, "
+        f"已自动注释一次性直播链接: {record_url}",
+        color_obj.YELLOW)
+    logger.warning(f"断流重试{max_retry_interrupted}次后自动注释链接: {record_url}")
+
+
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
 
@@ -1702,6 +1736,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     print(f"\r{anchor_name} 直播中断, 第{interrupted_retries}次重试检测中... "
                           f"(最多{max_retry_interrupted}次)", end="")
                 else:
+                    # 重试耗尽仍失败: 一次性直播链接(小红书/淘宝)旧链接已失效,
+                    # 自动注释该行停止轮询(下次开播需用户重新添加新链接)
+                    if stream_interrupted and platform in EPHEMERAL_LIVE_PLATFORMS:
+                        _comment_ephemeral_link(record_name, record_url)
                     stream_interrupted = False
                     interrupted_retries = 0
                     x = num
