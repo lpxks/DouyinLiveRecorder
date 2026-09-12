@@ -555,18 +555,29 @@ EPHEMERAL_LIVE_PLATFORMS = ('小红书直播', '淘宝直播')
 
 
 def find_comment_target_line(config_path: str, url: str) -> str | None:
-    """在 URL 配置文件中找到包含 url 且未被注释的活跃行, 返回去换行后的行文本。
+    """在 URL 配置文件中找到目标 url 的活跃(未注释)行, 返回去换行后的行文本。
 
+    优先按解析出的 URL 精确匹配——避免一个链接是另一个链接前缀时注释错行;
+    解析结果不匹配(如行内 URL 带额外查询参数)时回退为子串匹配的第一条。
+    读取时持有 file_update_lock, 避免读到主循环写回过程中的半截文件。
     找不到(不存在/已注释/读取失败)返回 None。
     """
+    fallback = None
     try:
-        with open(config_path, "r", encoding=text_encoding) as f:
-            for line in f:
-                if url in line and not line.lstrip().startswith('#'):
-                    return line.rstrip('\n')
+        with file_update_lock:
+            with open(config_path, "r", encoding=text_encoding) as f:
+                for line in f:
+                    text = line.rstrip('\n')
+                    if url not in text or text.lstrip().startswith('#'):
+                        continue
+                    if fallback is None:
+                        fallback = text
+                    parsed = split_url_line(text.lstrip(), '原画')
+                    if parsed[1].strip() == url:
+                        return text
     except OSError:
         return None
-    return None
+    return fallback
 
 
 def should_comment_offline_ephemeral(platform: str, is_live) -> bool:
@@ -586,7 +597,12 @@ def _comment_ephemeral_link(record_name: str, record_url: str) -> bool:
     if line is None:
         logger.warning(f"未找到可注释的活跃链接行(可能已被注释), 保留轮询: {record_url}")
         return False
-    update_file(url_config_file, line, line, start_str='#')
+    try:
+        update_file(url_config_file, line, line, start_str='#')
+    except OSError as e:
+        # 磁盘只读/权限/文件被占用等写入失败: 保留轮询, 不让异常打断录制线程
+        logger.warning(f"注释链接写入失败, 保留轮询: {record_url} ({e})")
+        return False
     color_obj.print_colored(
         f"[{record_name}] 一次性直播链接已失效, 已自动注释: {record_url}",
         color_obj.YELLOW)
