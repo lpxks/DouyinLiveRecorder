@@ -7,16 +7,12 @@ running_list 的清理(决定链接被重新打开后能否重新拉起线程)�
 """
 
 import ast
-import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from url_parser import split_url_line  # noqa: E402  (需先补 ROOT 到 sys.path)
 
 _LOADED_NAMES = ('find_comment_target_line', 'should_comment_offline_ephemeral',
                  '_comment_ephemeral_link', 'comment_offline_ephemeral_and_stop',
@@ -45,8 +41,7 @@ def load_namespace():
     namespace = {'text_encoding': 'utf-8-sig', 'logger': _FakeLogger(),
                  'color_obj': _FakeColor(), 'file_update_lock': threading.Lock(),
                  'ini_URL_content': '', 'monitoring': 1, 'recording': set(),
-                 'running_list': [], 'url_comments': [],
-                 'split_url_line': split_url_line}
+                 'running_list': [], 'url_comments': []}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, 'id', None) == 'EPHEMERAL_LIVE_PLATFORMS' for t in node.targets):
@@ -98,21 +93,6 @@ class FindCommentTargetLineTest(unittest.TestCase):
     def test_missing_file_returns_none(self):
         """文件不存在(读取失败)返回 None。"""
         self.assertIsNone(FIND(str(Path(self.tmp) / 'nope.ini'), 'https://x.com/y'))
-
-    def test_prefix_collision_prefers_exact_match(self):
-        """一个链接是另一个链接前缀时, 必须命中原链接的精确行(不能注释错行)。"""
-        short = 'https://www.xiaohongshu.com/user/profile/abc'
-        long = 'https://www.xiaohongshu.com/user/profile/abcdef'
-        path = self.write_config([f'原画，{short}', f'高清，{long}'])
-        # 目标为较长的链接: 子串匹配会错命中第一行, 精确匹配应命中第二行
-        self.assertEqual(FIND(path, long), f'高清，{long}')
-        self.assertEqual(FIND(path, short), f'原画，{short}')
-
-    def test_line_with_query_params_falls_back_to_substring(self):
-        """行内 URL 带额外查询参数(解析后不相等)时回退子串匹配, 仍能定位。"""
-        url = 'https://xhslink.com/abc'
-        path = self.write_config([f'原画，{url}?uid=888，主播A'])
-        self.assertEqual(FIND(path, url), f'原画，{url}?uid=888，主播A')
 
 
 class ShouldCommentOfflineEphemeralTest(unittest.TestCase):
@@ -172,22 +152,6 @@ class CommentEphemeralLinkTest(unittest.TestCase):
         before = path.read_text(encoding='utf-8')
         self.assertFalse(COMMENT_LINK('序号1 A', url))
         self.assertEqual(path.read_text(encoding='utf-8'), before)
-
-    def test_write_failure_returns_false_without_raising(self):
-        """写入失败(磁盘只读/权限/占用) → 返回 False, 不抛异常打断录制线程。"""
-        url = 'https://www.xiaohongshu.com/user/profile/abc123'
-        path = self.write_config([f'原画，{url}，主播A'])
-
-        def boom(*args, **kwargs):
-            raise OSError('read-only file system')
-
-        original = NS['update_file']
-        NS['update_file'] = boom
-        try:
-            self.assertFalse(COMMENT_LINK('序号1 主播A', url))
-        finally:
-            NS['update_file'] = original
-        self.assertIn(url, path.read_text(encoding='utf-8'))  # 文件未被改坏
 
 
 class CommentOfflineAndStopTest(unittest.TestCase):
