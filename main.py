@@ -550,37 +550,100 @@ def select_source_url(link, stream_info):
 
 
 # 一次性直播链接平台: 每次开播流地址都会变化, 旧链接在一次直播结束后即失效,
-# 断流重试耗尽后自动注释对应 URL_config.ini 行, 避免死链被无限轮询
+# 轮询到不在直播(断流快速重试窗口之外)即视为死链, 自动注释对应 URL_config.ini 行
 EPHEMERAL_LIVE_PLATFORMS = ('小红书直播', '淘宝直播')
 
 
 def find_comment_target_line(config_path: str, url: str) -> str | None:
-    """在 URL 配置文件中找到包含 url 且未被注释的活跃行, 返回去换行后的行文本。
+    """在 URL 配置文件中找到目标 url 的活跃(未注释)行, 返回去换行后的行文本。
 
+    优先按解析出的 URL 精确匹配——避免一个链接是另一个链接前缀时注释错行;
+    解析结果不匹配(如行内 URL 带额外查询参数)时回退为子串匹配的第一条。
+    读取时持有 file_update_lock, 避免读到主循环写回过程中的半截文件。
     找不到(不存在/已注释/读取失败)返回 None。
     """
+    fallback = None
     try:
-        with open(config_path, "r", encoding=text_encoding) as f:
-            for line in f:
-                if url in line and not line.lstrip().startswith('#'):
-                    return line.rstrip('\n')
+        with file_update_lock:
+            with open(config_path, "r", encoding=text_encoding) as f:
+                for line in f:
+                    text = line.rstrip('\n')
+                    if url not in text or text.lstrip().startswith('#'):
+                        continue
+                    if fallback is None:
+                        fallback = text
+                    if split_url_line(text.lstrip(), '原画')[1].strip() == url:
+                        return text
     except OSError:
         return None
-    return None
+    return fallback
 
 
-def _comment_ephemeral_link(record_name: str, record_url: str) -> None:
-    """断流重试耗尽后注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。"""
+def in_interrupted_retry_window(stream_interrupted: bool, interrupted_retries: int) -> bool:
+    """是否处于断流后的快速重试窗口内(录制中断后的前 max_retry_interrupted 次重试)。
+
+    窗口内的"不在直播"只是断流的延续, 不代表一次性链接失效, 不应注释;
+    窗口之外轮询到的"不在直播"才是链接失效的判据。
+    """
+    return bool(stream_interrupted) and interrupted_retries < max_retry_interrupted
+
+
+def should_comment_offline_ephemeral(platform: str, is_live,
+                                     in_retry_window: bool = False) -> bool:
+    """轮询到一次性直播链接平台(小红书/淘宝)不在直播时, 是否直接注释该链接。
+
+    这些平台每次开播的链接都会变化, 不在直播即说明当前链接已失效; 但断流后的
+    快速重试窗口内不注释(仍在尝试续录同一场直播)。is_live 非 False(None/缺失等
+    未知状态)时也不注释, 避免状态未知误伤。
+    """
+    return (is_live is False and not in_retry_window
+            and platform in EPHEMERAL_LIVE_PLATFORMS)
+
+
+def _comment_ephemeral_link(record_name: str, record_url: str,
+                            reason: str = '轮询到不在直播, ') -> bool:
+    """注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。
+
+    返回是否成功写入注释; 找不到活跃行/读取失败/写入失败返回 False
+    (调用方据此保留轮询, 不静默丢弃链接)。
+    """
     line = find_comment_target_line(url_config_file, record_url)
     if line is None:
-        logger.warning(f"未找到可注释的活跃链接行(可能已被注释): {record_url}")
-        return
-    update_file(url_config_file, line, line, start_str='#')
+        logger.warning(f"未找到可注释的活跃链接行(可能已被注释), 保留轮询: {record_url}")
+        return False
+    try:
+        update_file(url_config_file, line, line, start_str='#')
+    except OSError as e:
+        # 磁盘只读/权限/文件被占用等写入失败: 保留轮询, 不让异常打断录制线程
+        logger.warning(f"注释链接写入失败, 保留轮询: {record_url} ({e})")
+        return False
     color_obj.print_colored(
-        f"[{record_name}] 断流重试{max_retry_interrupted}次后仍失败, "
-        f"已自动注释一次性直播链接: {record_url}",
+        f"[{record_name}] {reason}已自动注释一次性直播链接: {record_url}",
         color_obj.YELLOW)
-    logger.warning(f"断流重试{max_retry_interrupted}次后自动注释链接: {record_url}")
+    logger.warning(f"{reason}已自动注释一次性直播链接: {record_url}")
+    return True
+
+
+def comment_offline_ephemeral_and_stop(record_name: str, record_url: str, platform: str,
+                                       is_live, in_retry_window: bool = False) -> bool:
+    """轮询到一次性直播链接不在直播: 注释该链接并同步清理录制列表。
+
+    返回是否应结束该链接的录制线程。注释失败(找不到活跃行/读取失败)时返回
+    False, 调用方继续轮询, 避免静默丢弃链接。
+
+    清理 running_list 不能只依赖 clear_record_info: 后者只在主循环已刷新
+    url_comments 时才移除条目, 而此处注释刚写入文件、内存里的 url_comments
+    尚未刷新, 会漏删; 残留条目会让该链接日后被重新启用时因"已在运行列表"
+    而拉不起录制线程(表现为重新打开链接后一直无人轮询/不再注释)。
+    """
+    if not should_comment_offline_ephemeral(platform, is_live, in_retry_window):
+        return False
+    if not _comment_ephemeral_link(record_name, record_url):
+        return False
+    clear_record_info(record_name, record_url)
+    if record_url in running_list:
+        running_list.remove(record_url)
+    return True
 
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
@@ -1132,6 +1195,15 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         daemon=True
                                     ).start()
                                 start_pushed = False
+
+                            # 一次性直播链接(小红书/淘宝): 快速重试窗口之外轮询到不在直播,
+                            # 即说明该链接已失效(链接每次开播都会变), 注释并结束该链接线程;
+                            # 断流后的快速重试窗口内不注释, 保留"直播已恢复, 自动续录"的机会
+                            if comment_offline_ephemeral_and_stop(
+                                    record_name, record_url, platform, port_info['is_live'],
+                                    in_interrupted_retry_window(stream_interrupted,
+                                                                interrupted_retries)):
+                                return
 
                         else:
                             if stream_interrupted:
@@ -1730,7 +1802,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                 # 直播录制结束(不论正常结束或断流中断), 统一走快速重试检测逻辑
                 # 前5次2~5秒随机, 后5次5~8秒随机
-                if stream_interrupted and interrupted_retries < max_retry_interrupted:
+                if in_interrupted_retry_window(stream_interrupted, interrupted_retries):
                     x = retry_delay(interrupted_retries)
                     interrupted_retries += 1
                     print(f"\r{anchor_name} 直播中断, 第{interrupted_retries}次重试检测中... "
@@ -1739,7 +1811,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     # 重试耗尽仍失败: 一次性直播链接(小红书/淘宝)旧链接已失效,
                     # 自动注释该行停止轮询(下次开播需用户重新添加新链接)
                     if stream_interrupted and platform in EPHEMERAL_LIVE_PLATFORMS:
-                        _comment_ephemeral_link(record_name, record_url)
+                        _comment_ephemeral_link(
+                            record_name, record_url,
+                            reason=f'断流重试{max_retry_interrupted}次后仍失败, ')
                     stream_interrupted = False
                     interrupted_retries = 0
                     x = num
