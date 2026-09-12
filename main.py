@@ -577,18 +577,21 @@ def should_comment_offline_ephemeral(platform: str, is_live) -> bool:
     return is_live is False and platform in EPHEMERAL_LIVE_PLATFORMS
 
 
-def _comment_ephemeral_link(record_name: str, record_url: str) -> None:
-    """断流重试耗尽后注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。"""
+def _comment_ephemeral_link(record_name: str, record_url: str) -> bool:
+    """注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。
+
+    返回是否成功写入注释; 找不到活跃行/读取失败返回 False(调用方不应据此丢弃链接)。
+    """
     line = find_comment_target_line(url_config_file, record_url)
     if line is None:
-        logger.warning(f"未找到可注释的活跃链接行(可能已被注释): {record_url}")
-        return
+        logger.warning(f"未找到可注释的活跃链接行(可能已被注释), 保留轮询: {record_url}")
+        return False
     update_file(url_config_file, line, line, start_str='#')
     color_obj.print_colored(
-        f"[{record_name}] 断流重试{max_retry_interrupted}次后仍失败, "
-        f"已自动注释一次性直播链接: {record_url}",
+        f"[{record_name}] 一次性直播链接已失效, 已自动注释: {record_url}",
         color_obj.YELLOW)
-    logger.warning(f"断流重试{max_retry_interrupted}次后自动注释链接: {record_url}")
+    logger.warning(f"已自动注释一次性直播链接: {record_url}")
+    return True
 
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
@@ -1142,10 +1145,16 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 start_pushed = False
 
                             # 一次性直播链接(小红书/淘宝): 轮询到不在直播即视为该链接
-                            # 已失效(链接每次开播都会变), 直接注释并结束该链接线程
-                            if should_comment_offline_ephemeral(platform, port_info['is_live']):
-                                _comment_ephemeral_link(record_name, record_url)
+                            # 已失效(链接每次开播都会变), 直接注释并结束该链接线程;
+                            # 注释失败(找不到活跃行等)则保留轮询, 不静默丢弃
+                            if should_comment_offline_ephemeral(platform, port_info['is_live']) \
+                                    and _comment_ephemeral_link(record_name, record_url):
                                 clear_record_info(record_name, record_url)
+                                # clear_record_info 仅在主循环已刷新 url_comments 时
+                                # 才清理 running_list; 此处注释刚写入尚未刷新, 故同步
+                                # 移除, 否则残留会导致该链接日后重新启用时拉不起线程
+                                if record_url in running_list:
+                                    running_list.remove(record_url)
                                 return
 
                         else:
