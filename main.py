@@ -594,6 +594,28 @@ def _comment_ephemeral_link(record_name: str, record_url: str) -> bool:
     return True
 
 
+def comment_offline_ephemeral_and_stop(record_name: str, record_url: str,
+                                       platform: str, is_live) -> bool:
+    """轮询到一次性直播链接不在直播: 注释该链接并同步清理录制列表。
+
+    返回是否应结束该链接的录制线程。注释失败(找不到活跃行/读取失败)时返回
+    False, 调用方继续轮询, 避免静默丢弃链接。
+
+    清理 running_list 不能只依赖 clear_record_info: 后者只在主循环已刷新
+    url_comments 时才移除条目, 而此处注释刚写入文件、内存里的 url_comments
+    尚未刷新, 会漏删; 残留条目会让该链接日后被重新启用时因"已在运行列表"
+    而拉不起录制线程(表现为重新打开链接后一直无人轮询/不再注释)。
+    """
+    if not should_comment_offline_ephemeral(platform, is_live):
+        return False
+    if not _comment_ephemeral_link(record_name, record_url):
+        return False
+    clear_record_info(record_name, record_url)
+    if record_url in running_list:
+        running_list.remove(record_url)
+    return True
+
+
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
 
@@ -1145,16 +1167,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 start_pushed = False
 
                             # 一次性直播链接(小红书/淘宝): 轮询到不在直播即视为该链接
-                            # 已失效(链接每次开播都会变), 直接注释并结束该链接线程;
+                            # 已失效(链接每次开播都会变), 注释并结束该链接线程;
                             # 注释失败(找不到活跃行等)则保留轮询, 不静默丢弃
-                            if should_comment_offline_ephemeral(platform, port_info['is_live']) \
-                                    and _comment_ephemeral_link(record_name, record_url):
-                                clear_record_info(record_name, record_url)
-                                # clear_record_info 仅在主循环已刷新 url_comments 时
-                                # 才清理 running_list; 此处注释刚写入尚未刷新, 故同步
-                                # 移除, 否则残留会导致该链接日后重新启用时拉不起线程
-                                if record_url in running_list:
-                                    running_list.remove(record_url)
+                            if comment_offline_ephemeral_and_stop(
+                                    record_name, record_url, platform, port_info['is_live']):
                                 return
 
                         else:
