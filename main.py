@@ -569,14 +569,6 @@ def find_comment_target_line(config_path: str, url: str) -> str | None:
     return None
 
 
-def should_comment_offline_ephemeral(platform: str, is_live) -> bool:
-    """一次性直播链接平台(小红书/淘宝)轮询到不在直播时, 是否直接注释该链接。
-
-    这些平台每次开播的链接都会变化, 轮询到不在直播即说明当前链接已失效。
-    """
-    return is_live is False and platform in EPHEMERAL_LIVE_PLATFORMS
-
-
 def _comment_ephemeral_link(record_name: str, record_url: str) -> None:
     """断流重试耗尽后注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。"""
     line = find_comment_target_line(url_config_file, record_url)
@@ -1140,13 +1132,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         daemon=True
                                     ).start()
                                 start_pushed = False
-
-                            # 一次性直播链接(小红书/淘宝): 轮询到不在直播即视为该链接
-                            # 已失效(链接每次开播都会变), 直接注释并结束该链接线程
-                            if should_comment_offline_ephemeral(platform, port_info['is_live']):
-                                _comment_ephemeral_link(record_name, record_url)
-                                clear_record_info(record_name, record_url)
-                                return
 
                         else:
                             if stream_interrupted:
