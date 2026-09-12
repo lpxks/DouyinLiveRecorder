@@ -22,9 +22,12 @@ sys.path.insert(0, str(ROOT))
 from url_parser import split_url_line  # noqa: E402  (需先补 ROOT 到 sys.path)
 
 _LOADED_NAMES = ('find_comment_target_line', 'in_interrupted_retry_window',
-                 'should_comment_offline_ephemeral', '_comment_ephemeral_link',
+                 'should_comment_offline_ephemeral', 'should_comment_unresolved_ephemeral',
+                 '_comment_ephemeral_link', 'comment_ephemeral_and_stop',
                  'comment_offline_ephemeral_and_stop', 'clear_record_info',
-                 'update_file', 'EPHEMERAL_LIVE_PLATFORMS')
+                 'update_file')
+
+_LOADED_CONSTANTS = ('EPHEMERAL_LIVE_PLATFORMS', 'EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS')
 
 MAX_RETRY = 10
 
@@ -56,11 +59,11 @@ def load_namespace():
                  'split_url_line': split_url_line}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-                getattr(t, 'id', None) == 'EPHEMERAL_LIVE_PLATFORMS' for t in node.targets):
+                getattr(t, 'id', None) in _LOADED_CONSTANTS for t in node.targets):
             exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), namespace)
         elif isinstance(node, ast.FunctionDef) and node.name in _LOADED_NAMES:
             exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), namespace)
-    missing = [n for n in _LOADED_NAMES if n not in namespace]
+    missing = [n for n in _LOADED_NAMES + _LOADED_CONSTANTS if n not in namespace]
     if missing:
         raise RuntimeError(f'not found in main.py: {missing}')
     return namespace
@@ -70,8 +73,10 @@ NS = load_namespace()
 FIND = NS['find_comment_target_line']
 IN_RETRY = NS['in_interrupted_retry_window']
 SHOULD_COMMENT = NS['should_comment_offline_ephemeral']
+SHOULD_COMMENT_UNRESOLVED = NS['should_comment_unresolved_ephemeral']
 COMMENT_LINK = NS['_comment_ephemeral_link']
 COMMENT_AND_STOP = NS['comment_offline_ephemeral_and_stop']
+COMMENT_ANY_AND_STOP = NS['comment_ephemeral_and_stop']
 
 
 class FindCommentTargetLineTest(unittest.TestCase):
@@ -180,6 +185,40 @@ class ShouldCommentOfflineEphemeralTest(unittest.TestCase):
         """断流快速重试窗口内不在直播也不注释(可能只是同一场直播的短暂中断)。"""
         self.assertFalse(SHOULD_COMMENT('小红书直播', False, True))
         self.assertFalse(SHOULD_COMMENT('淘宝直播', False, True))
+
+
+class ShouldCommentUnresolvedEphemeralTest(unittest.TestCase):
+    """完全取不到直播间信息(主播名为空)时是否应注释: 需要连续多轮确认。"""
+
+    def setUp(self):
+        NS['EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS'] = 2
+
+    def tearDown(self):
+        NS['EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS'] = 2
+
+    def test_single_failure_does_not_comment(self):
+        """单轮获取失败可能只是网络抖动/风控拦截, 不注释。"""
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('小红书直播', 0))
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('小红书直播', 1))
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('淘宝直播', 1))
+
+    def test_consecutive_failures_comment(self):
+        """连续失败达到阈值(如淘宝cookie失效)即视为死链注释。"""
+        self.assertTrue(SHOULD_COMMENT_UNRESOLVED('小红书直播', 2))
+        self.assertTrue(SHOULD_COMMENT_UNRESOLVED('淘宝直播', 3))
+
+    def test_retry_window_suppresses_comment(self):
+        """断流快速重试窗口内获取失败不注释(交给重试耗尽路径)。"""
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('小红书直播', 10, True))
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('淘宝直播', 10, True))
+
+    def test_other_platform_never_comments(self):
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('抖音直播', 10))
+
+    def test_threshold_follows_constant(self):
+        NS['EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS'] = 3
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('小红书直播', 2))
+        self.assertTrue(SHOULD_COMMENT_UNRESOLVED('小红书直播', 3))
 
 
 class CommentEphemeralLinkTest(unittest.TestCase):
@@ -340,8 +379,24 @@ class OfflineCommentLifecycleTest(unittest.TestCase):
         self.assertIn(self.url, NS['running_list'])
 
 
+    def test_unresolved_fallback_comments_at_threshold(self):
+        """获取失败路径: 第 1 轮不注释, 第 2 轮(达到阈值)注释并清理。"""
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('淘宝直播', 1))
+        self.assertTrue(SHOULD_COMMENT_UNRESOLVED('淘宝直播', 2))
+        self.assertTrue(COMMENT_ANY_AND_STOP(self.record_name, self.url,
+                                             '连续2轮获取直播信息失败, '))
+        content = self.path.read_text(encoding='utf-8')
+        self.assertIn(f'#原画，{self.url}，主播A', content)
+        self.assertNotIn(self.url, NS['running_list'])
+
+    def test_unresolved_in_retry_window_never_comments(self):
+        """断流快速重试窗口内的获取失败不注释(重试耗尽路径会兜底)。"""
+        self.assertFalse(SHOULD_COMMENT_UNRESOLVED('小红书直播', 10, True))
+        self.assertNotIn('#', self.path.read_text(encoding='utf-8'))
+
+
 class StartRecordWiringTest(unittest.TestCase):
-    """源码级串联检查: 离线注释必须挂在"等待直播"分支, 且传入快速重试窗口判定。"""
+    """源码级串联检查: 两条"一次性链接失效"路径都必须接进 start_record。"""
 
     def setUp(self):
         self.source = (ROOT / 'main.py').read_text(encoding='utf-8')
@@ -355,8 +410,20 @@ class StartRecordWiringTest(unittest.TestCase):
         self.assertIn('in_interrupted_retry_window(', block)
         self.assertIn('return', block)
 
+    def test_unresolved_branch_triggers_comment(self):
+        """"网址内容获取失败"分支(主播名为空)必须能按连续失败轮数注释。"""
+        start = self.source.index('if not port_info.get("anchor_name", \'\'):')
+        end = self.source.index('else:\n                        unresolved_rounds = 0', start)
+        block = self.source[start:end]
+        self.assertIn('unresolved_rounds += 1', block)
+        self.assertIn('should_comment_unresolved_ephemeral(', block)
+        self.assertIn('comment_ephemeral_and_stop(', block)
+        self.assertIn('return', block)
+        # 成功取到信息后必须清零连续失败轮数
+        self.assertIn('unresolved_rounds = 0', self.source[end:end + 200])
+
     def test_retry_window_check_is_single_source_of_truth(self):
-        """窗口判定只定义一次(重试延迟与离线注释共用), 避免两处条件漂移。"""
+        """窗口判定只定义一次(重试延迟与两条注释路径共用), 避免多处条件漂移。"""
         self.assertEqual(len(re.findall(r'def in_interrupted_retry_window\(', self.source)), 1)
         self.assertEqual(
             len(re.findall(r'interrupted_retries < max_retry_interrupted', self.source)), 1)

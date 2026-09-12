@@ -553,6 +553,10 @@ def select_source_url(link, stream_info):
 # 轮询到不在直播(断流快速重试窗口之外)即视为死链, 自动注释对应 URL_config.ini 行
 EPHEMERAL_LIVE_PLATFORMS = ('小红书直播', '淘宝直播')
 
+# 完全取不到直播间信息(主播名为空)时, 连续多少轮才把一次性链接当死链注释;
+# 单轮失败可能只是网络抖动或平台风控拦截, 不作为失效判据
+EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS = 2
+
 
 def find_comment_target_line(config_path: str, url: str) -> str | None:
     """在 URL 配置文件中找到目标 url 的活跃(未注释)行, 返回去换行后的行文本。
@@ -600,6 +604,18 @@ def should_comment_offline_ephemeral(platform: str, is_live,
             and platform in EPHEMERAL_LIVE_PLATFORMS)
 
 
+def should_comment_unresolved_ephemeral(platform: str, unresolved_rounds: int,
+                                        in_retry_window: bool = False) -> bool:
+    """连续多轮完全取不到直播间信息时, 是否把一次性链接当作死链注释掉。
+
+    "获取失败"既可能是死链(小红书链接彻底失效/淘宝cookie失效被风控), 也可能只是
+    单轮网络抖动或风控拦截, 所以要求连续 EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS 轮
+    都取不到才注释; 断流后的快速重试窗口内不注释(留给重试耗尽路径处理)。
+    """
+    return (not in_retry_window and unresolved_rounds >= EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS
+            and platform in EPHEMERAL_LIVE_PLATFORMS)
+
+
 def _comment_ephemeral_link(record_name: str, record_url: str,
                             reason: str = '轮询到不在直播, ') -> bool:
     """注释一次性直播链接(小红书/淘宝), 停止对死链的后续轮询。
@@ -624,26 +640,32 @@ def _comment_ephemeral_link(record_name: str, record_url: str,
     return True
 
 
-def comment_offline_ephemeral_and_stop(record_name: str, record_url: str, platform: str,
-                                       is_live, in_retry_window: bool = False) -> bool:
-    """轮询到一次性直播链接不在直播: 注释该链接并同步清理录制列表。
-
-    返回是否应结束该链接的录制线程。注释失败(找不到活跃行/读取失败)时返回
-    False, 调用方继续轮询, 避免静默丢弃链接。
+def comment_ephemeral_and_stop(record_name: str, record_url: str, reason: str) -> bool:
+    """注释一次性直播链接并清理录制状态, 返回是否应结束该链接的录制线程。
 
     清理 running_list 不能只依赖 clear_record_info: 后者只在主循环已刷新
     url_comments 时才移除条目, 而此处注释刚写入文件、内存里的 url_comments
     尚未刷新, 会漏删; 残留条目会让该链接日后被重新启用时因"已在运行列表"
     而拉不起录制线程(表现为重新打开链接后一直无人轮询/不再注释)。
     """
-    if not should_comment_offline_ephemeral(platform, is_live, in_retry_window):
-        return False
-    if not _comment_ephemeral_link(record_name, record_url):
+    if not _comment_ephemeral_link(record_name, record_url, reason):
         return False
     clear_record_info(record_name, record_url)
     if record_url in running_list:
         running_list.remove(record_url)
     return True
+
+
+def comment_offline_ephemeral_and_stop(record_name: str, record_url: str, platform: str,
+                                       is_live, in_retry_window: bool = False) -> bool:
+    """轮询到一次性直播链接不在直播: 注释该链接并同步清理录制列表。
+
+    返回是否应结束该链接的录制线程。注释失败(找不到活跃行/读取失败)时返回
+    False, 调用方继续轮询, 避免静默丢弃链接。
+    """
+    if not should_comment_offline_ephemeral(platform, is_live, in_retry_window):
+        return False
+    return comment_ephemeral_and_stop(record_name, record_url, '轮询到不在直播, ')
 
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
@@ -660,6 +682,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             retry = 0
             stream_interrupted = False
             interrupted_retries = 0
+            unresolved_rounds = 0  # 连续多少轮完全取不到直播间信息(主播名为空)
             was_recording = False
             record_quality_zh, record_url, anchor_name = url_data
             record_name = f'序号{count_variable} {anchor_name}'
@@ -1159,7 +1182,22 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         with max_request_lock:
                             error_count += 1
                             error_window.append(1)
+
+                        # 一次性直播链接(小红书/淘宝): 连续多轮完全取不到直播间信息
+                        # (链接彻底失效/淘宝cookie失效被风控)同样说明该链接不可用,
+                        # 注释掉; 断流快速重试窗口内不注释(交给重试耗尽路径处理),
+                        # 单轮失败也不注释(可能只是网络抖动)
+                        unresolved_rounds += 1
+                        if should_comment_unresolved_ephemeral(
+                                platform, unresolved_rounds,
+                                in_interrupted_retry_window(stream_interrupted,
+                                                            interrupted_retries)):
+                            if comment_ephemeral_and_stop(
+                                    record_name, record_url,
+                                    f'连续{unresolved_rounds}轮获取直播信息失败, '):
+                                return
                     else:
+                        unresolved_rounds = 0
                         anchor_name = clean_name(anchor_name)
                         record_name = f'序号{count_variable} {anchor_name}'
 
