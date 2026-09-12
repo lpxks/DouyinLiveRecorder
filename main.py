@@ -550,12 +550,13 @@ def select_source_url(link, stream_info):
 
 
 # 一次性直播链接平台: 每次开播流地址都会变化, 旧链接在一次直播结束后即失效,
-# 轮询到不在直播(断流快速重试窗口之外)即视为死链, 自动注释对应 URL_config.ini 行
+# 连续多轮都检测不到在直播(断流快速重试窗口之外)即视为死链, 自动注释对应配置行
 EPHEMERAL_LIVE_PLATFORMS = ('小红书直播', '淘宝直播')
 
-# 完全取不到直播间信息(主播名为空)时, 连续多少轮才把一次性链接当死链注释;
-# 单轮失败可能只是网络抖动或平台风控拦截, 不作为失效判据
-EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS = 2
+# "连续多少轮都没检测到在直播"才把一次性链接当死链注释。计数合并两种情况:
+# 轮询到不在直播(is_live False)与完全取不到直播间信息(主播名为空)。录制环境网络
+# 卡顿时单轮甚至两轮失败都很常见, 阈值取 3 以免把还能用的链接误注释掉
+EPHEMERAL_NOT_LIVE_COMMENT_ROUNDS = 3
 
 
 def find_comment_target_line(config_path: str, url: str) -> str | None:
@@ -592,27 +593,20 @@ def in_interrupted_retry_window(stream_interrupted: bool, interrupted_retries: i
     return bool(stream_interrupted) and interrupted_retries < max_retry_interrupted
 
 
-def should_comment_offline_ephemeral(platform: str, is_live,
-                                     in_retry_window: bool = False) -> bool:
-    """轮询到一次性直播链接平台(小红书/淘宝)不在直播时, 是否直接注释该链接。
+def should_comment_ephemeral(platform: str, is_live, not_live_rounds: int,
+                             in_retry_window: bool = False) -> bool:
+    """连续多轮都没检测到在直播时, 是否把一次性直播链接(小红书/淘宝)注释掉。
 
-    这些平台每次开播的链接都会变化, 不在直播即说明当前链接已失效; 但断流后的
-    快速重试窗口内不注释(仍在尝试续录同一场直播)。is_live 非 False(None/缺失等
-    未知状态)时也不注释, 避免状态未知误伤。
+    这些平台每次开播的链接都会变化, 长期不在直播即说明当前链接已失效。计数把
+    "轮询到不在直播"与"完全取不到直播间信息(主播名为空)"合并, 并要求连续
+    EPHEMERAL_NOT_LIVE_COMMENT_ROUNDS 轮都没看到在直播; 中间只要有一轮看到在直播
+    就清零重算, 避免录制环境网络卡顿时的偶发失败把还能用的链接误注释掉。
+
+    断流后的快速重试窗口内不注释(仍在尝试续录同一场直播); is_live 非 False
+    (None/缺失等未知状态)时也不注释, 避免状态未知误伤。
     """
     return (is_live is False and not in_retry_window
-            and platform in EPHEMERAL_LIVE_PLATFORMS)
-
-
-def should_comment_unresolved_ephemeral(platform: str, unresolved_rounds: int,
-                                        in_retry_window: bool = False) -> bool:
-    """连续多轮完全取不到直播间信息时, 是否把一次性链接当作死链注释掉。
-
-    "获取失败"既可能是死链(小红书链接彻底失效/淘宝cookie失效被风控), 也可能只是
-    单轮网络抖动或风控拦截, 所以要求连续 EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS 轮
-    都取不到才注释; 断流后的快速重试窗口内不注释(留给重试耗尽路径处理)。
-    """
-    return (not in_retry_window and unresolved_rounds >= EPHEMERAL_UNRESOLVED_COMMENT_ROUNDS
+            and not_live_rounds >= EPHEMERAL_NOT_LIVE_COMMENT_ROUNDS
             and platform in EPHEMERAL_LIVE_PLATFORMS)
 
 
@@ -656,18 +650,6 @@ def comment_ephemeral_and_stop(record_name: str, record_url: str, reason: str) -
     return True
 
 
-def comment_offline_ephemeral_and_stop(record_name: str, record_url: str, platform: str,
-                                       is_live, in_retry_window: bool = False) -> bool:
-    """轮询到一次性直播链接不在直播: 注释该链接并同步清理录制列表。
-
-    返回是否应结束该链接的录制线程。注释失败(找不到活跃行/读取失败)时返回
-    False, 调用方继续轮询, 避免静默丢弃链接。
-    """
-    if not should_comment_offline_ephemeral(platform, is_live, in_retry_window):
-        return False
-    return comment_ephemeral_and_stop(record_name, record_url, '轮询到不在直播, ')
-
-
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
 
@@ -682,7 +664,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             retry = 0
             stream_interrupted = False
             interrupted_retries = 0
-            unresolved_rounds = 0  # 连续多少轮完全取不到直播间信息(主播名为空)
+            not_live_rounds = 0  # 连续多少轮未检测到该链接在直播(不在直播/取不到信息)
             was_recording = False
             record_quality_zh, record_url, anchor_name = url_data
             record_name = f'序号{count_variable} {anchor_name}'
@@ -1183,21 +1165,20 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                             error_count += 1
                             error_window.append(1)
 
-                        # 一次性直播链接(小红书/淘宝): 连续多轮完全取不到直播间信息
-                        # (链接彻底失效/淘宝cookie失效被风控)同样说明该链接不可用,
-                        # 注释掉; 断流快速重试窗口内不注释(交给重试耗尽路径处理),
-                        # 单轮失败也不注释(可能只是网络抖动)
-                        unresolved_rounds += 1
-                        if should_comment_unresolved_ephemeral(
-                                platform, unresolved_rounds,
+                        # 一次性直播链接(小红书/淘宝): 完全取不到直播间信息
+                        # (链接彻底失效/淘宝cookie失效被风控)也算"没检测到在直播",
+                        # 与"不在直播"合并计数; 达到阈值才注释, 网络卡顿的偶发失败不会
+                        # 立即注释; 断流快速重试窗口内不注释(交给重试耗尽路径处理)
+                        not_live_rounds += 1
+                        if should_comment_ephemeral(
+                                platform, port_info.get('is_live'), not_live_rounds,
                                 in_interrupted_retry_window(stream_interrupted,
                                                             interrupted_retries)):
                             if comment_ephemeral_and_stop(
                                     record_name, record_url,
-                                    f'连续{unresolved_rounds}轮获取直播信息失败, '):
+                                    f'连续{not_live_rounds}轮未检测到直播, '):
                                 return
                     else:
-                        unresolved_rounds = 0
                         anchor_name = clean_name(anchor_name)
                         record_name = f'序号{count_variable} {anchor_name}'
 
@@ -1234,14 +1215,18 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     ).start()
                                 start_pushed = False
 
-                            # 一次性直播链接(小红书/淘宝): 快速重试窗口之外轮询到不在直播,
-                            # 即说明该链接已失效(链接每次开播都会变), 注释并结束该链接线程;
-                            # 断流后的快速重试窗口内不注释, 保留"直播已恢复, 自动续录"的机会
-                            if comment_offline_ephemeral_and_stop(
-                                    record_name, record_url, platform, port_info['is_live'],
+                            # 一次性直播链接(小红书/淘宝): 快速重试窗口之外连续多轮
+                            # 都轮询到不在直播, 才认定该链接已失效(链接每次开播都会变),
+                            # 注释并结束该链接线程; 网络卡顿的偶发失败不会立即注释
+                            not_live_rounds += 1
+                            if should_comment_ephemeral(
+                                    platform, port_info['is_live'], not_live_rounds,
                                     in_interrupted_retry_window(stream_interrupted,
                                                                 interrupted_retries)):
-                                return
+                                if comment_ephemeral_and_stop(
+                                        record_name, record_url,
+                                        f'连续{not_live_rounds}轮未检测到直播, '):
+                                    return
 
                         else:
                             if stream_interrupted:
@@ -1249,6 +1234,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                         color_obj.GREEN)
                                 stream_interrupted = False
                                 interrupted_retries = 0
+                            not_live_rounds = 0  # 检测到在直播, 未检测到直播的计数清零
 
                             content = f"\r{record_name} 正在直播中..."
                             print(content)
