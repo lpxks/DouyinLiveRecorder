@@ -153,12 +153,54 @@ async def get_bilibili_stream_data(url, qn='10000', platform='web', proxy_addr=N
         logger.error(f"get_bilibili_stream_data failed: {url}, {type(e).__name__}: {e}")
         return {"anchor_name": "", "is_live": False}
 
+def _xhs_anchor_from_html(html_str: str) -> str:
+    """从小红书直播间页面 __INITIAL_STATE__ 中取主播名(roomData.hostInfo.nickName)。
+
+    已下播/未开播的直播间同样带 hostInfo, 但 streamget 只在直播中
+    (liveStatus == success)或用户主页可解析时才给出主播名; 取不到主播名会让
+    main.py 把"已下播"误判成"网址内容获取失败"而无限重试, 因此这里兜底解析。
+    解析失败(页面异常/风控拦截)返回 ''。
+    """
+    match_data = re.search("<script>window.__INITIAL_STATE__=(.*?)</script>", html_str or '')
+    if not match_data:
+        return ''
+    try:
+        state = json.loads(match_data.group(1).replace("undefined", "null"))
+    except ValueError:
+        return ''
+    live_stream = (state or {}).get("liveStream") or {}
+    host_info = ((live_stream.get("roomData") or {}).get("hostInfo")) or {}
+    return str(host_info.get("nickName") or '').strip()
+
+
+async def _xhs_page_anchor_name(live_stream, json_data: dict) -> str:
+    """兜底获取小红书主播名: 直接解析直播间页面(已下播也能拿到)。
+
+    取不到(链接彻底失效/页面异常)返回 '', 保持 main.py 的"获取失败"重试语义。
+    """
+    page_url = (json_data or {}).get('live_url') or ''
+    if not page_url:
+        return ''
+    try:
+        html_str = await async_req(page_url, proxy_addr=live_stream.proxy_addr,
+                                   headers=live_stream.mobile_headers)
+    except Exception as e:
+        logger.error(f"小红书直播间页面获取失败: {page_url}, {type(e).__name__}: {e}")
+        return ''
+    return _xhs_anchor_from_html(html_str)
+
+
 @trace_error_decorator
 async def get_xhs_stream_url(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
     try:
         live_stream = streamget.RedNoteLiveStream(proxy_addr=proxy_addr, cookies=cookies)
         json_data = await live_stream.fetch_app_stream_data(url)
-        return _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
+        result = _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
+        if not result.get("anchor_name"):
+            # 已下播/未开播的小红书直播间(一次性链接的常见状态)拿不到主播名时,
+            # main.py 会走"网址内容获取失败"重试路径, 永远不会判定为"不在直播"
+            result["anchor_name"] = await _xhs_page_anchor_name(live_stream, json_data)
+        return result
     except Exception as e:
         logger.error(f"get_xhs_stream_url failed: {url}, {type(e).__name__}: {e}")
         return {"anchor_name": "", "is_live": False}
