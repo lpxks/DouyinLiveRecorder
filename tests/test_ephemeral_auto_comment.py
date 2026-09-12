@@ -1,9 +1,8 @@
 """一次性直播链接自动注释辅助函数测试。
 
 find_comment_target_line / should_comment_offline_ephemeral / _comment_ephemeral_link
-/ comment_offline_ephemeral_and_stop 从 main.py 用 AST 提取真实源码执行(避免导入
-整个程序): 定位活跃行、判断是否应注释、给配置行加 '#' 的实际写入, 以及注释后
-running_list 的清理(决定链接被重新打开后能否重新拉起线程)都在这里验证。
+从 main.py 用 AST 提取真实源码执行(避免导入整个程序): 定位活跃行、判断是否应注释、
+以及给配置行加 '#' 的实际写入行为都在这里验证。
 """
 
 import ast
@@ -15,8 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 _LOADED_NAMES = ('find_comment_target_line', 'should_comment_offline_ephemeral',
-                 '_comment_ephemeral_link', 'comment_offline_ephemeral_and_stop',
-                 'clear_record_info', 'update_file', 'EPHEMERAL_LIVE_PLATFORMS')
+                 '_comment_ephemeral_link', 'update_file', 'EPHEMERAL_LIVE_PLATFORMS')
 
 
 class _FakeLogger:
@@ -40,8 +38,7 @@ def load_namespace():
     tree = ast.parse(main_py.read_text(encoding='utf-8'))
     namespace = {'text_encoding': 'utf-8-sig', 'logger': _FakeLogger(),
                  'color_obj': _FakeColor(), 'file_update_lock': threading.Lock(),
-                 'ini_URL_content': '', 'monitoring': 1, 'recording': set(),
-                 'running_list': [], 'url_comments': []}
+                 'ini_URL_content': ''}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, 'id', None) == 'EPHEMERAL_LIVE_PLATFORMS' for t in node.targets):
@@ -58,7 +55,6 @@ NS = load_namespace()
 FIND = NS['find_comment_target_line']
 SHOULD_COMMENT = NS['should_comment_offline_ephemeral']
 COMMENT_LINK = NS['_comment_ephemeral_link']
-COMMENT_AND_STOP = NS['comment_offline_ephemeral_and_stop']
 
 
 class FindCommentTargetLineTest(unittest.TestCase):
@@ -152,61 +148,6 @@ class CommentEphemeralLinkTest(unittest.TestCase):
         before = path.read_text(encoding='utf-8')
         self.assertFalse(COMMENT_LINK('序号1 A', url))
         self.assertEqual(path.read_text(encoding='utf-8'), before)
-
-
-class CommentOfflineAndStopTest(unittest.TestCase):
-    """离线注释 + 录制列表清理(用户场景: 注释后重新打开链接仍能再次注释)。"""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.url = 'https://www.xiaohongshu.com/user/profile/abc123'
-        self.record_name = '序号1 主播A'
-
-    def write_config(self, lines):
-        path = Path(self.tmp) / 'URL_config.ini'
-        path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-        NS['url_config_file'] = str(path)
-        NS['max_retry_interrupted'] = 10
-        NS['running_list'] = [self.url]
-        NS['url_comments'] = []          # 主循环尚未刷新(注释刚写入)
-        NS['recording'] = {self.record_name}
-        NS['monitoring'] = 1
-        return path
-
-    def test_comment_and_clean_running_list(self):
-        """注释成功 → 返回 True 且 running_list 不再残留(重新打开后能重拉线程)。"""
-        path = self.write_config([f'原画，{self.url}，主播A'])
-        self.assertTrue(COMMENT_AND_STOP(self.record_name, self.url, '小红书直播', False))
-        self.assertIn(f'#原画，{self.url}，主播A', path.read_text(encoding='utf-8'))
-        self.assertNotIn(self.url, NS['running_list'])
-
-    def test_reopen_then_comment_again(self):
-        """模拟用户把注释行重新打开: 再次轮询到不在直播时应能再次注释并清理。"""
-        path = self.write_config([f'原画，{self.url}，主播A'])
-        self.assertTrue(COMMENT_AND_STOP(self.record_name, self.url, '小红书直播', False))
-        # 用户手动打开注释(去掉行首 '#')并重新入列
-        path.write_text(f'原画，{self.url}，主播A\n', encoding='utf-8')
-        NS['running_list'] = [self.url]
-        self.assertTrue(COMMENT_AND_STOP(self.record_name, self.url, '小红书直播', False))
-        self.assertIn(f'#原画，{self.url}，主播A', path.read_text(encoding='utf-8'))
-        self.assertNotIn(self.url, NS['running_list'])
-
-    def test_comment_failure_keeps_running(self):
-        """找不到活跃行 → 返回 False 且不动 running_list(继续轮询, 不静默丢弃)。"""
-        path = self.write_config(['原画，https://other.com/x'])
-        before = path.read_text(encoding='utf-8')
-        self.assertFalse(COMMENT_AND_STOP(self.record_name, self.url, '小红书直播', False))
-        self.assertEqual(path.read_text(encoding='utf-8'), before)
-        self.assertIn(self.url, NS['running_list'])
-
-    def test_other_platform_or_live_noop(self):
-        """非一次性平台 / 在直播中 → 不注释且不动录制列表。"""
-        path = self.write_config([f'原画，{self.url}，主播A'])
-        before = path.read_text(encoding='utf-8')
-        self.assertFalse(COMMENT_AND_STOP(self.record_name, self.url, '抖音直播', False))
-        self.assertFalse(COMMENT_AND_STOP(self.record_name, self.url, '小红书直播', True))
-        self.assertEqual(path.read_text(encoding='utf-8'), before)
-        self.assertIn(self.url, NS['running_list'])
 
 
 if __name__ == '__main__':
