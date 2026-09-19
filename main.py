@@ -39,7 +39,9 @@ from ffmpeg_install import (
 )
 from retry import retry_delay
 from src.flv_proxy import FLVProxy
-from url_parser import dedup_priority_action, find_writeback_index, split_url_line
+from url_parser import (LEGACY_PRIORITY_LEVEL, LEGACY_PRIORITY_MARK, LEVEL_DEFAULT,
+                        dedup_marker_action, find_writeback_index, level_mark,
+                        resolve_check_interval, resolve_jitter, split_url_line)
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -57,7 +59,7 @@ error_threshold = 5
 monitoring = 0
 running_list = []
 url_tuples_list = []
-priority_urls = set()
+level_by_url = {}  # url -> 检查时长等级(A/B/C); 每轮解析后原子替换, 未标注的链接不入表
 url_comments = []
 text_no_repeat_url = []
 create_var = locals()
@@ -121,7 +123,8 @@ def display_info() -> None:
                 if monitoring == 0:
                     print("\r没有正在监测和录制的直播")
                 else:
-                    print(f"\r没有正在录制的直播 循环监测间隔时间：{delay_default}秒")
+                    level_desc = ' '.join(f'{lv}={level_intervals[lv]}秒' for lv in ('A', 'B', 'C'))
+                    print(f"\r没有正在录制的直播 检查间隔(等级)：{level_desc} (默认{LEVEL_DEFAULT}级)")
             else:
                 now_time = datetime.datetime.now()
                 print("x" * 60)
@@ -1813,10 +1816,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         error_count += 1
                         error_window.append(1)
 
-                if record_url in priority_urls:
-                    num = random.randint(-1, 1) + priority_delay
-                else:
-                    num = random.randint(-5, 5) + delay_default
+                # 该链接的检查间隔由 URL_config.ini 行尾的等级(A/B/C)决定;
+                # 未标注等级按默认级; 抖动沿用原行为(A 等级 ±1, B/C ±5)
+                link_level = level_by_url.get(record_url)
+                num = (random.randint(-resolve_jitter(link_level),
+                                      resolve_jitter(link_level))
+                       + resolve_check_interval(link_level, level_intervals))
                 if num < 0:
                     num = 0
 
@@ -1970,6 +1975,28 @@ def read_config_value(config_parser: configparser.RawConfigParser, section: str,
         return default_value
 
 
+# 各检查时长等级的默认间隔(秒): A=最高级(原优先标记), B=中级, C=默认级
+LEVEL_INTERVAL_DEFAULTS = {'A': 5, 'B': 30, 'C': 90}
+
+
+def read_level_intervals(config_parser: configparser.RawConfigParser) -> dict:
+    """读取 [检查时长等级] 段各等级的轮询检查间隔(秒)。
+
+    非法值(非数字/小于 1 秒)回退该等级的默认值, 避免一条错误配置把轮询间隔变成
+    0 秒空转。
+    """
+    intervals = {}
+    for level, default_seconds in LEVEL_INTERVAL_DEFAULTS.items():
+        raw_value = read_config_value(config_parser, '检查时长等级', f'{level}等级检查时长(秒)', default_seconds)
+        try:
+            seconds = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            seconds = 0
+        intervals[level] = seconds if seconds >= 1 else default_seconds
+    return intervals
+
+
+
 options = {"是": True, "否": False}
 config = configparser.RawConfigParser()
 language = read_config_value(config, '录制设置', 'language(zh_cn/en)', "zh_cn")
@@ -2032,7 +2059,6 @@ while True:
     proxy_addr = None if not use_proxy else proxy_addr_bak
     max_request = int(read_config_value(config, '录制设置', '同一时间访问网络的线程数', 3))
     semaphore = threading.Semaphore(max_request)
-    delay_default = int(read_config_value(config, '录制设置', '循环时间(秒)', 120))
     local_delay_default = int(read_config_value(config, '录制设置', '排队读取网址时间(秒)', 0))
     loop_time = options.get(read_config_value(config, '录制设置', '是否显示循环秒数', "否"), False)
     show_url = options.get(read_config_value(config, '录制设置', '是否显示直播源地址', "否"), False)
@@ -2041,7 +2067,7 @@ while True:
     disk_space_limit = float(read_config_value(config, '录制设置', '录制空间剩余阈值(gb)', 1.0))
     split_time = str(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800))
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
-    priority_delay = max(1, int(read_config_value(config, '优先监控', '优先监控轮询间隔(秒)', 3)))
+    level_intervals = read_level_intervals(config)
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
@@ -2169,7 +2195,7 @@ while True:
         file_modified = False        # 标记文件是否被修改
 
         # 一次性读取所有行到内存
-        new_priority_urls = set()
+        new_level_by_url = {}
         with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
             raw_lines = file.readlines()
 
@@ -2212,7 +2238,24 @@ while True:
             if is_comment:
                 line = line.lstrip('#')
 
-            quality, url, name, has_priority = split_url_line(line, video_record_quality)
+            quality, url, name, has_legacy_priority, level = split_url_line(
+                line, video_record_quality)
+
+            if has_legacy_priority:
+                # 旧版 ",优先: 是" 标记迁移为等级 A(显式等级优先, 只丢弃旧标记);
+                # 一次性改写文件, 之后代码里不再有"优先"概念
+                if level:
+                    migrated_mark = ''
+                    migrated_level = level
+                else:
+                    migrated_mark = level_mark(LEGACY_PRIORITY_LEVEL)
+                    migrated_level = LEGACY_PRIORITY_LEVEL
+                line = line.replace(LEGACY_PRIORITY_MARK, migrated_mark)
+                origin_line = origin_line.replace(LEGACY_PRIORITY_MARK, migrated_mark)
+                level = migrated_level
+                file_modified = True
+                color_obj.print_colored(
+                    f"\r{url} 的旧标记 ',优先: 是' 已迁移为等级 {level}", color_obj.YELLOW)
 
             url = 'https://' + url if '://' not in url else url
             url_host = url.split('/')[2]
@@ -2334,16 +2377,17 @@ while True:
                 # 检查URL是否重复（无论注释/非注释）
                 if url in seen_url_info:
                     first_info = seen_url_info[url]
-                    # 去重时的优先标记处理：标注保留、不激活（见 dedup_priority_action）
-                    action = dedup_priority_action(
-                        has_priority, is_comment,
-                        first_info['is_comment'], first_info.get('is_priority', False))
+                    # 去重时的等级标记处理：标注保留、不激活（见 dedup_marker_action）
+                    action = dedup_marker_action(
+                        level is not None, is_comment,
+                        first_info['is_comment'], first_info.get('has_marker', False))
                     if action == 'merge':
                         kept_line = output_lines[first_info['output_idx']]
                         body = kept_line.rstrip('\n\r')
                         suffix = kept_line[len(body):]
-                        output_lines[first_info['output_idx']] = body + ',优先: 是' + suffix
-                        first_info['is_priority'] = True
+                        output_lines[first_info['output_idx']] = body + level_mark(level) + suffix
+                        first_info['has_marker'] = True
+                        first_info['level'] = level
                         file_modified = True
                     elif action == 'keep_comment':
                         # 生效行 + 带标记注释行：保留注释作为暂停标注（同 URL 仅保留一条），不激活
@@ -2360,10 +2404,12 @@ while True:
                             output_lines.append(origin_line)
                             url_comments = [i for i in url_comments if i != url]
                             url_tuples_list.append((quality, url, name))
+                            new_level_by_url[url] = level
                             # 去重基准切换到新增生效行，后续生效行重复按其去重
                             seen_url_info[url] = {
                                 'is_comment': False,
-                                'is_priority': False,
+                                'has_marker': level is not None,
+                                'level': level,
                                 'output_idx': len(output_lines) - 1,
                             }
                         else:
@@ -2380,9 +2426,9 @@ while True:
                         url_comments = [i for i in url_comments if i != url]
                         url_tuples_list.append((quality, url, name))
                         first_info['is_comment'] = False
-                    # 去重后按保留行决定优先级（含合并标记后立即生效）
-                    if first_info.get('is_priority', False) and not first_info['is_comment']:
-                        new_priority_urls.add(url)
+                    # 去重后按保留行决定等级（含合并标记后立即生效）
+                    if first_info.get('has_marker', False) and not first_info['is_comment']:
+                        new_level_by_url[url] = first_info.get('level')
                     # 所有重复情况：删除新行，保留第一条
                     file_modified = True
                     continue
@@ -2390,7 +2436,8 @@ while True:
                 # 首次出现的URL，记录位置和注释状态
                 seen_url_info[url] = {
                     'is_comment': is_comment,
-                    'is_priority': has_priority,
+                    'has_marker': level is not None,
+                    'level': level,
                     'output_idx': len(output_lines)
                 }
 
@@ -2405,8 +2452,7 @@ while True:
                     output_lines.append(origin_line)
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
-                    if has_priority:
-                        new_priority_urls.add(url)
+                    new_level_by_url[url] = level
             else:
                 # 未知链接，注释掉
                 if not is_comment:
@@ -2416,8 +2462,8 @@ while True:
                 else:
                     output_lines.append(origin_line)
 
-        # 解析完成后一次性替换优先集合，避免解析期间线程看到空集合
-        priority_urls = new_priority_urls
+        # 解析完成后一次性替换等级映射，避免解析期间线程看到半成品
+        level_by_url = new_level_by_url
 
         # 处理need_update_line_list
         while len(need_update_line_list):
@@ -2459,7 +2505,10 @@ while True:
                     continue
 
                 if url_tuple[1] not in running_list:
-                    print(f"\r{'新增' if not first_start else '传入'}地址: {url_tuple[1]}")
+                    link_level = level_by_url.get(url_tuple[1])
+                    print(f"\r{'新增' if not first_start else '传入'}地址: {url_tuple[1]} "
+                          f"(等级{link_level or LEVEL_DEFAULT} "
+                          f"检查间隔{resolve_check_interval(link_level, level_intervals)}秒)")
                     monitoring += 1
                     args = [url_tuple, monitoring]
                     create_var[f'thread_{monitoring}'] = threading.Thread(target=start_record, args=args)
