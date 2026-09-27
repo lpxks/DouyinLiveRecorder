@@ -40,8 +40,9 @@ from ffmpeg_install import (
 from retry import retry_delay
 from src.flv_proxy import FLVProxy
 from url_parser import (LEGACY_PRIORITY_LEVEL, LEGACY_PRIORITY_MARK, LEVEL_DEFAULT,
-                        dedup_marker_action, find_writeback_index, level_mark,
-                        resolve_check_interval, resolve_jitter, split_url_line)
+                        MIN_INTERVAL_SECONDS, dedup_marker_action, find_writeback_index,
+                        interval_spec_warning, resolve_check_interval, resolve_jitter,
+                        spec_mark, split_url_line)
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -59,7 +60,8 @@ error_threshold = 5
 monitoring = 0
 running_list = []
 url_tuples_list = []
-level_by_url = {}  # url -> 检查时长等级(A/B/C); 每轮解析后原子替换, 未标注的链接不入表
+interval_spec_by_url = {}  # url -> 间隔标记(字母或秒数); 每轮解析后原子替换, 未标注不入表
+warned_interval_specs = set()  # 已提示过问题的间隔标记, 避免每轮解析重复刷屏
 url_comments = []
 text_no_repeat_url = []
 create_var = locals()
@@ -123,8 +125,10 @@ def display_info() -> None:
                 if monitoring == 0:
                     print("\r没有正在监测和录制的直播")
                 else:
-                    level_desc = ' '.join(f'{lv}={level_intervals[lv]}秒' for lv in ('A', 'B', 'C'))
-                    print(f"\r没有正在录制的直播 检查间隔(等级)：{level_desc} (默认{LEVEL_DEFAULT}级)")
+                    level_desc = ' '.join(f'{lv}={level_intervals[lv]}秒'
+                                          for lv in sorted(level_intervals))
+                    print(f"\r没有正在录制的直播 检查间隔(字母A-Z或秒数)：{level_desc} "
+                          f"(默认{LEVEL_DEFAULT}级)")
             else:
                 now_time = datetime.datetime.now()
                 print("x" * 60)
@@ -1816,12 +1820,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         error_count += 1
                         error_window.append(1)
 
-                # 该链接的检查间隔由 URL_config.ini 行尾的等级(A/B/C)决定;
-                # 未标注等级按默认级; 抖动沿用原行为(A 等级 ±1, B/C ±5)
-                link_level = level_by_url.get(record_url)
-                num = (random.randint(-resolve_jitter(link_level),
-                                      resolve_jitter(link_level))
-                       + resolve_check_interval(link_level, level_intervals))
+                # 该链接的检查间隔由 URL_config.ini 行尾的标记决定: 字母查 [检查时长等级],
+                # 直接写秒数则用该秒数; 未标注按默认级。抖动: A 等级/小间隔 ±1, 其余 ±5
+                link_spec = interval_spec_by_url.get(record_url)
+                link_jitter = resolve_jitter(link_spec)
+                num = (random.randint(-link_jitter, link_jitter)
+                       + resolve_check_interval(link_spec, level_intervals))
                 if num < 0:
                     num = 0
 
@@ -1975,24 +1979,51 @@ def read_config_value(config_parser: configparser.RawConfigParser, section: str,
         return default_value
 
 
-# 各检查时长等级的默认间隔(秒): A=最高级(原优先标记), B=中级, C=默认级
+# 内置字母的默认间隔(秒): A=最高级(原优先标记), B=中级, C=默认级;
+# 用户可在 [检查时长等级] 段自行增行扩展其它字母(如 D等级检查时长(秒) = 15)
 LEVEL_INTERVAL_DEFAULTS = {'A': 5, 'B': 30, 'C': 90}
+
+# 配置段里一个"字母等级"选项的键名(注意 configparser 会把键名转成小写)
+LEVEL_INTERVAL_OPTION_RE = re.compile(r'^([a-z])等级检查时长\(秒\)$')
+
+
+def _parse_interval_seconds(raw_value, default_seconds: int) -> int:
+    """配置里的秒数: 非数字/小于下限时回退 default_seconds, 避免 0 秒空转。"""
+    try:
+        seconds = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        seconds = 0
+    return seconds if seconds >= MIN_INTERVAL_SECONDS else default_seconds
 
 
 def read_level_intervals(config_parser: configparser.RawConfigParser) -> dict:
-    """读取 [检查时长等级] 段各等级的轮询检查间隔(秒)。
+    """读取 [检查时长等级] 段里所有字母的轮询检查间隔(秒)。
 
-    非法值(非数字/小于 1 秒)回退该等级的默认值, 避免一条错误配置把轮询间隔变成
-    0 秒空转。
+    字母不限于内置的 A/B/C: 段里每多一个 `<字母>等级检查时长(秒)` 键就多一个可用等级
+    (URL 行尾写该字母即可用)。非法值回退该字母的默认值/默认级, 避免一条错误配置把
+    轮询间隔变成 0 秒空转。
     """
+    section = '检查时长等级'
     intervals = {}
+    # 先读内置字母: 顺带让缺失的段/键按默认值自动创建
     for level, default_seconds in LEVEL_INTERVAL_DEFAULTS.items():
-        raw_value = read_config_value(config_parser, '检查时长等级', f'{level}等级检查时长(秒)', default_seconds)
-        try:
-            seconds = int(str(raw_value).strip())
-        except (TypeError, ValueError):
-            seconds = 0
-        intervals[level] = seconds if seconds >= 1 else default_seconds
+        raw_value = read_config_value(config_parser, section, f'{level}等级检查时长(秒)', default_seconds)
+        intervals[level] = _parse_interval_seconds(raw_value, default_seconds)
+
+    # 再收集用户自行扩展的字母
+    if config_parser.has_section(section):
+        default_seconds = intervals.get(LEVEL_DEFAULT, MIN_INTERVAL_SECONDS)
+        for option, raw_value in config_parser.items(section):
+            matched = LEVEL_INTERVAL_OPTION_RE.match(option)
+            if not matched:
+                continue
+            level = matched.group(1).upper()
+            if level in intervals:
+                continue
+            if _parse_interval_seconds(raw_value, 0) < MIN_INTERVAL_SECONDS:
+                logger.warning(f"[检查时长等级] {level}等级检查时长(秒) 的值无效({raw_value}), "
+                               f"已按默认级 {LEVEL_DEFAULT}({default_seconds}秒) 处理")
+            intervals[level] = _parse_interval_seconds(raw_value, default_seconds)
     return intervals
 
 
@@ -2195,7 +2226,7 @@ while True:
         file_modified = False        # 标记文件是否被修改
 
         # 一次性读取所有行到内存
-        new_level_by_url = {}
+        new_interval_spec_by_url = {}
         with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
             raw_lines = file.readlines()
 
@@ -2238,24 +2269,31 @@ while True:
             if is_comment:
                 line = line.lstrip('#')
 
-            quality, url, name, has_legacy_priority, level = split_url_line(
+            quality, url, name, has_legacy_priority, spec = split_url_line(
                 line, video_record_quality)
 
             if has_legacy_priority:
-                # 旧版 ",优先: 是" 标记迁移为等级 A(显式等级优先, 只丢弃旧标记);
+                # 旧版 ",优先: 是" 标记迁移为等级 A(显式标记优先, 只丢弃旧标记);
                 # 一次性改写文件, 之后代码里不再有"优先"概念
-                if level:
+                if spec:
                     migrated_mark = ''
-                    migrated_level = level
+                    migrated_spec = spec
                 else:
-                    migrated_mark = level_mark(LEGACY_PRIORITY_LEVEL)
-                    migrated_level = LEGACY_PRIORITY_LEVEL
+                    migrated_mark = spec_mark(LEGACY_PRIORITY_LEVEL)
+                    migrated_spec = LEGACY_PRIORITY_LEVEL
                 line = line.replace(LEGACY_PRIORITY_MARK, migrated_mark)
                 origin_line = origin_line.replace(LEGACY_PRIORITY_MARK, migrated_mark)
-                level = migrated_level
+                spec = migrated_spec
                 file_modified = True
                 color_obj.print_colored(
-                    f"\r{url} 的旧标记 ',优先: 是' 已迁移为等级 {level}", color_obj.YELLOW)
+                    f"\r{url} 的旧标记 ',优先: 是' 已迁移为标记 {spec}", color_obj.YELLOW)
+
+            # 间隔标记有问题(字母未配置/行内秒数超范围)时提示一次, 该标记按默认级处理
+            spec_warning = interval_spec_warning(spec, level_intervals)
+            if spec_warning and spec not in warned_interval_specs:
+                warned_interval_specs.add(spec)
+                color_obj.print_colored(f"\r{url} 的间隔标记 {spec}: {spec_warning}", color_obj.YELLOW)
+                logger.warning(f"间隔标记 {spec}: {spec_warning} ({url})")
 
             url = 'https://' + url if '://' not in url else url
             url_host = url.split('/')[2]
@@ -2379,15 +2417,15 @@ while True:
                     first_info = seen_url_info[url]
                     # 去重时的等级标记处理：标注保留、不激活（见 dedup_marker_action）
                     action = dedup_marker_action(
-                        level is not None, is_comment,
+                        spec is not None, is_comment,
                         first_info['is_comment'], first_info.get('has_marker', False))
                     if action == 'merge':
                         kept_line = output_lines[first_info['output_idx']]
                         body = kept_line.rstrip('\n\r')
                         suffix = kept_line[len(body):]
-                        output_lines[first_info['output_idx']] = body + level_mark(level) + suffix
+                        output_lines[first_info['output_idx']] = body + spec_mark(spec) + suffix
                         first_info['has_marker'] = True
-                        first_info['level'] = level
+                        first_info['spec'] = spec
                         file_modified = True
                     elif action == 'keep_comment':
                         # 生效行 + 带标记注释行：保留注释作为暂停标注（同 URL 仅保留一条），不激活
@@ -2404,12 +2442,12 @@ while True:
                             output_lines.append(origin_line)
                             url_comments = [i for i in url_comments if i != url]
                             url_tuples_list.append((quality, url, name))
-                            new_level_by_url[url] = level
+                            new_interval_spec_by_url[url] = spec
                             # 去重基准切换到新增生效行，后续生效行重复按其去重
                             seen_url_info[url] = {
                                 'is_comment': False,
-                                'has_marker': level is not None,
-                                'level': level,
+                                'has_marker': spec is not None,
+                                'spec': spec,
                                 'output_idx': len(output_lines) - 1,
                             }
                         else:
@@ -2426,9 +2464,9 @@ while True:
                         url_comments = [i for i in url_comments if i != url]
                         url_tuples_list.append((quality, url, name))
                         first_info['is_comment'] = False
-                    # 去重后按保留行决定等级（含合并标记后立即生效）
+                    # 去重后按保留行决定间隔标记（含合并标记后立即生效）
                     if first_info.get('has_marker', False) and not first_info['is_comment']:
-                        new_level_by_url[url] = first_info.get('level')
+                        new_interval_spec_by_url[url] = first_info.get('spec')
                     # 所有重复情况：删除新行，保留第一条
                     file_modified = True
                     continue
@@ -2436,8 +2474,8 @@ while True:
                 # 首次出现的URL，记录位置和注释状态
                 seen_url_info[url] = {
                     'is_comment': is_comment,
-                    'has_marker': level is not None,
-                    'level': level,
+                    'has_marker': spec is not None,
+                    'spec': spec,
                     'output_idx': len(output_lines)
                 }
 
@@ -2452,7 +2490,7 @@ while True:
                     output_lines.append(origin_line)
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
-                    new_level_by_url[url] = level
+                    new_interval_spec_by_url[url] = spec
             else:
                 # 未知链接，注释掉
                 if not is_comment:
@@ -2462,8 +2500,8 @@ while True:
                 else:
                     output_lines.append(origin_line)
 
-        # 解析完成后一次性替换等级映射，避免解析期间线程看到半成品
-        level_by_url = new_level_by_url
+        # 解析完成后一次性替换间隔标记映射，避免解析期间线程看到半成品
+        interval_spec_by_url = new_interval_spec_by_url
 
         # 处理need_update_line_list
         while len(need_update_line_list):
@@ -2505,10 +2543,24 @@ while True:
                     continue
 
                 if url_tuple[1] not in running_list:
-                    link_level = level_by_url.get(url_tuple[1])
+                    link_spec = interval_spec_by_url.get(url_tuple[1])
+                    link_seconds = resolve_check_interval(link_spec, level_intervals)
+                    spec_problem = interval_spec_warning(link_spec, level_intervals)
+                    is_inline_number = bool(link_spec and link_spec.isdigit())
+                    if is_inline_number:
+                        spec_label = f'行内间隔{link_spec}秒'
+                    else:
+                        spec_label = f'等级{link_spec or LEVEL_DEFAULT}'
+                    if spec_problem and is_inline_number:
+                        spec_desc = f'{spec_label}超范围, 按默认级 检查间隔{link_seconds}秒'
+                    elif spec_problem:
+                        spec_desc = f'{spec_label}未配置, 按默认级 检查间隔{link_seconds}秒'
+                    elif is_inline_number:
+                        spec_desc = f'行内间隔{link_seconds}秒'
+                    else:
+                        spec_desc = f'{spec_label} 检查间隔{link_seconds}秒'
                     print(f"\r{'新增' if not first_start else '传入'}地址: {url_tuple[1]} "
-                          f"(等级{link_level or LEVEL_DEFAULT} "
-                          f"检查间隔{resolve_check_interval(link_level, level_intervals)}秒)")
+                          f"({spec_desc})")
                     monitoring += 1
                     args = [url_tuple, monitoring]
                     create_var[f'thread_{monitoring}'] = threading.Thread(target=start_record, args=args)
