@@ -70,6 +70,7 @@ def load_namespace():
 
 NS = load_namespace()
 READ_LEVEL_INTERVALS = NS['read_level_intervals']
+LEVEL_INTERVAL_DEFAULTS = NS['LEVEL_INTERVAL_DEFAULTS']
 
 
 class ReadLevelIntervalsTest(unittest.TestCase):
@@ -144,6 +145,13 @@ class ReadLevelIntervalsTest(unittest.TestCase):
     def test_multi_letter_option_is_ignored(self):
         got = self.read({}, section_items={'ab等级检查时长(秒)': '9'}, has_section=True)
         self.assertEqual(got, DEFAULTS)
+
+    def test_builtin_letters_match_url_parser(self):
+        """main.py 的内置字母默认值必须与 url_parser.BUILTIN_LEVELS 一致, 避免两处漂移。"""
+        self.assertEqual(set(LEVEL_INTERVAL_DEFAULTS), set(BUILTIN_LEVELS))
+        self.assertEqual(LEVEL_DEFAULT, 'C')
+        for seconds in LEVEL_INTERVAL_DEFAULTS.values():
+            self.assertGreaterEqual(seconds, MIN_INTERVAL_SECONDS)
 
     def test_builtin_letters_not_overridden_by_custom_scan(self):
         got = self.read({'A等级检查时长(秒)': '3'}, section_items={'a等级检查时长(秒)': '99'},
@@ -246,6 +254,11 @@ class MainWiringTest(unittest.TestCase):
         self.assertIn('resolve_check_interval(link_spec, level_intervals)', self.source)
         self.assertIn('resolve_jitter(link_spec)', self.source)
         self.assertIn('link_spec = interval_spec_by_url.get(record_url)', self.source)
+
+    def test_delay_never_below_min_interval(self):
+        """行内最小 1 秒 + ±1 抖动可能算出 0, 必须夹到至少 1 秒, 否则退化成不停轮询。"""
+        self.assertIn('if num < MIN_INTERVAL_SECONDS:', self.source)
+        self.assertNotIn('if num < 0:', self.source)
 
     def test_legacy_marker_migrates_to_level_a(self):
         self.assertIn('LEGACY_PRIORITY_MARK', self.source)

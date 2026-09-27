@@ -1826,8 +1826,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                 link_jitter = resolve_jitter(link_spec)
                 num = (random.randint(-link_jitter, link_jitter)
                        + resolve_check_interval(link_spec, level_intervals))
-                if num < 0:
-                    num = 0
+                if num < MIN_INTERVAL_SECONDS:
+                    # 行内秒数可以小到 1 秒, 抖动后可能算出 0: 至少保证 1 秒间隔,
+                    # 否则会退化成不停轮询(每轮一次平台接口请求)
+                    num = MIN_INTERVAL_SECONDS
 
                 if error_count > 20:
                     num = num + 60
