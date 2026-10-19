@@ -1,19 +1,26 @@
-"""URL_config.ini 行解析：检查间隔标记与字段拆分。
+"""URL_config.ini 行解析：检查间隔标记、分段时长标记与字段拆分。
 
-行格式（间隔标记可写在任意位置，推荐放在主播名之后）::
+行格式（标记可写在任意位置，推荐放在主播名之后）::
 
-    https://live.douyin.com/277869507858,主播: MMA盼盼,A    # 字母: 时长在 config 里配
-    https://live.douyin.com/277869507858,主播: MMA盼盼,45   # 直接写秒数
+    https://live.douyin.com/277869507858,主播: MMA盼盼,A           # 字母: 时长在 config 里配
+    https://live.douyin.com/277869507858,主播: MMA盼盼,45          # 直接写秒数
+    https://live.douyin.com/277869507858,主播: MMA盼盼,dur: 30m    # 这条链接按 30 分钟分段
+    https://live.douyin.com/277869507858,dur: off                  # 这条链接不分段
 
 字母时长在 config.ini 的 `[检查时长等级]` 段配置(`<字母>等级检查时长(秒)`)，默认
 A=5 / B=30 / C=90；字母可以自行扩展(不限于 A/B/C)，段里多一个字母键就多一个可用等级。
 行内也可以直接写秒数(允许范围见 MIN/MAX_INTERVAL_SECONDS)。未标标记的链接按默认级 C 轮询。
+
+分段时长标记 `dur: <数字><单位>` 只覆盖该链接的分段时长(h/m/s)；没写标记的链接按
+config.ini 的 `分段录制是否开启` / `视频分段时间(秒)` 执行；`dur: 0|off|关闭` 让该链接
+不分段。分段标记同样与字段切分解耦，不会混进主播名。
 
 旧的 `,优先: 是` 标记已废弃，解析时会被识别（has_legacy_priority）并由调用方
 一次性迁移为 `,A`，避免老配置静默降级。
 """
 
 import re
+from typing import NamedTuple
 
 # 内置默认字母(配置模板会给这三行)；字母可自行扩展
 BUILTIN_LEVELS = ('A', 'B', 'C')
@@ -32,6 +39,19 @@ JITTER_DEFAULT = 5
 # 行内直接写秒数的合法范围(秒): 更小容易被平台限制, 过大等于放弃检查
 MIN_INTERVAL_SECONDS = 1
 MAX_INTERVAL_SECONDS = 86400
+
+# 行内分段时长标记: `dur: 30m` / `dur: 1.5h` / `dur: 90s`; `dur: 0|off|关闭` 表示不分段。
+# 只接受"单个数字 + 单个单位", 不支持 `1h30m` 这类复合写法; 省略单位视为非法
+# (避免 `dur: 30` 被误判成 30 秒), 由调用方提示后按系统配置执行。
+SEGMENT_UNIT_SECONDS = {'h': 3600, 'm': 60, 's': 1}
+MIN_SEGMENT_SECONDS = 1
+MAX_SEGMENT_SECONDS = 7 * 86400     # 7 天: 再长等于没分段
+SEGMENT_DISABLED = 0                # dur: 0/off: 该链接不启用分段
+DURATION_MARK_NAME = 'dur'
+
+_DURATION_MARK_RE = re.compile(r'^\s*dur\s*[:：]\s*(\d+(?:\.\d+)?)\s*([hms])\s*$', re.IGNORECASE)
+_DURATION_DISABLE_RE = re.compile(r'^\s*dur\s*[:：]\s*(?:0|off|关闭)\s*$', re.IGNORECASE)
+_DURATION_LIKE_RE = re.compile(r'^\s*dur\s*[:：]', re.IGNORECASE)
 
 _SPEC_LETTER_RE = re.compile(r'^[A-Za-z]$')
 _SPEC_NUMBER_RE = re.compile(r'^\d+$')
@@ -95,14 +115,104 @@ def contains_url(string: str) -> bool:
     return re.search(pattern, string) is not None
 
 
-def split_url_line(line: str, default_quality: str):
-    """拆分行字段，返回 (quality, url, name, has_legacy_priority, spec)。
+def is_duration_field(field) -> bool:
+    """字段是不是一个 `dur:` 分段标记(不论值是否合法)。"""
+    text = field.strip() if isinstance(field, str) else ''
+    return bool(_DURATION_LIKE_RE.match(text))
 
-    间隔标记(字母或秒数)与旧的 `,优先: 是` 都在字段切分前被识别并剥离，避免标记里的
-    逗号干扰字段对齐。字段顺序按"URL 在哪"定位：URL 之前的字段是画质，之后的字段是
-    主播名——因此 ``URL,主播: X,45`` 这类没有画质前缀的行也能正确解析。
+
+def parse_duration_field(field) -> tuple:
+    """解析单个 `dur:` 字段，返回 (是否 dur 字段, 秒数)。
+
+    秒数为 None 表示写了 dur 标记但值非法(缺单位/单位不支持/超出范围)；
+    SEGMENT_DISABLED(0) 表示 `dur: 0|off|关闭`，即该链接关闭分段。
+    """
+    if not is_duration_field(field):
+        return False, None
+    text = field.strip()
+    if _DURATION_DISABLE_RE.match(text):
+        return True, SEGMENT_DISABLED
+    matched = _DURATION_MARK_RE.match(text)
+    if not matched:
+        return True, None
+    unit = SEGMENT_UNIT_SECONDS[matched.group(2).lower()]
+    seconds = int(round(float(matched.group(1)) * unit))
+    if not (MIN_SEGMENT_SECONDS <= seconds <= MAX_SEGMENT_SECONDS):
+        return True, None
+    return True, seconds
+
+
+def extract_duration_mark(fields: list) -> tuple:
+    """从字段列表里取出 `dur:` 分段标记，返回 (秒数, 原始文本, 剩余字段)。
+
+    `dur:` 字段一律从字段列表中剔除，避免混进主播名；同一行多个标记以最后一个为准。
+    秒数 None 表示最后一个标记的值非法(原始文本仍会返回，供调用方提示后按系统配置执行)。
+    """
+    seconds = None
+    raw = None
+    remaining = []
+    for field in fields:
+        is_dur, value = parse_duration_field(field)
+        if is_dur:
+            seconds = value
+            raw = field.strip()
+        else:
+            remaining.append(field)
+    return seconds, raw, remaining
+
+
+def duration_mark(raw) -> str:
+    """分段标记 → 行内文本(用于去重合并时的写回)，空文本返回空串。"""
+    text = raw.strip() if isinstance(raw, str) else ''
+    return f',{text}' if text else ''
+
+
+def duration_spec_warning(seconds, raw) -> str | None:
+    """分段标记的配置警告（没有问题返回 None）。
+
+    值非法时该链接按系统配置执行，这里只给出提示文本，由调用方负责打印
+    （同一标记只提示一次，避免每轮解析刷屏）。
+    """
+    if not raw:
+        return None
+    if seconds is None:
+        return (f'分段标记 {raw} 无法识别(需形如 dur: 30m / dur: 1.5h / dur: 90s, '
+                f'或 dur: off 关闭分段), 已按系统配置处理')
+    return None
+
+
+class LineInfo(NamedTuple):
+    """一行 URL 配置的解析结果(分段标记与检查间隔标记都已从字段里剥离)。"""
+
+    quality: str
+    url: str
+    name: str
+    has_legacy_priority: bool
+    spec: str | None            # 检查间隔标记: 字母 或 行内秒数; None=按默认级
+    duration: int | None        # 分段秒数; None=未标注(按系统配置); SEGMENT_DISABLED=不分段
+    duration_raw: str | None    # dur 字段原文(写回/告警用)
+
+
+def split_url_line(line: str, default_quality: str):
+    """兼容入口：返回 (quality, url, name, has_legacy_priority, spec) 五元组。
+
+    `dur:` 分段标记同样会被剥离(不会混进主播名)，但不在返回值里；
+    需要分段时长请用 parse_line()。
+    """
+    info = parse_line(line, default_quality)
+    return info.quality, info.url, info.name, info.has_legacy_priority, info.spec
+
+
+def parse_line(line: str, default_quality: str) -> LineInfo:
+    """拆分行字段，返回 LineInfo。
+
+    间隔标记(字母或秒数)、分段标记(`dur: 30m`)与旧的 `,优先: 是` 都在字段切分前被识别
+    并剥离，避免标记里的逗号干扰字段对齐。字段顺序按"URL 在哪"定位：URL 之前的字段是
+    画质，之后的字段是主播名——因此 ``URL,主播: X,45`` 这类没有画质前缀的行也能正确解析。
 
     - spec: 'A'/'B'/'C'/'D' 等字母, 或 '45' 这类行内秒数; 未标注为 None(按默认级处理)
+    - duration: 分段秒数; None=未标注; SEGMENT_DISABLED=该链接不分段
+    - duration_raw: dur 字段原文(含非法值，供调用方提示)
     - has_legacy_priority: 是否出现过废弃的 `,优先: 是`（调用方负责迁移成 ,A）
     - 字段数多于"画质+URL+主播名"时（如主播名里带逗号），多余字段会并入主播名，
       不再像旧实现那样因解包失败抛 ValueError 打断整轮配置解析
@@ -116,6 +226,7 @@ def split_url_line(line: str, default_quality: str):
     else:
         fields = [line]
 
+    duration, duration_raw, fields = extract_duration_mark(fields)
     spec, fields = extract_interval_spec(fields)
     url_index = next((i for i, field in enumerate(fields) if contains_url(field)), None)
 
@@ -131,7 +242,8 @@ def split_url_line(line: str, default_quality: str):
     quality = quality.strip()
     if quality not in QUALITY_NAMES:
         quality = default_quality
-    return quality, url.strip(), name, has_legacy_priority, spec
+    return LineInfo(quality, url.strip(), name, has_legacy_priority, spec,
+                    duration, duration_raw)
 
 
 def dedup_marker_action(has_marker: bool, is_comment: bool,

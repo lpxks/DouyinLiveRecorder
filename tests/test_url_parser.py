@@ -13,10 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from url_parser import (  # noqa: E402  (需先补 ROOT 到 sys.path)
     BUILTIN_LEVELS, JITTER_DEFAULT, JITTER_SMALL, LEGACY_PRIORITY_MARK, LEVEL_DEFAULT,
-    MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, dedup_marker_action, extract_interval_spec,
-    find_writeback_index, interval_spec_warning, is_interval_spec, is_letter_spec,
-    is_number_spec, is_valid_number_spec, normalize_spec, resolve_check_interval,
-    resolve_jitter, spec_mark, split_url_line,
+    MAX_INTERVAL_SECONDS, MAX_SEGMENT_SECONDS, MIN_INTERVAL_SECONDS, MIN_SEGMENT_SECONDS,
+    SEGMENT_DISABLED, dedup_marker_action, duration_mark, duration_spec_warning,
+    extract_duration_mark, extract_interval_spec, find_writeback_index, interval_spec_warning,
+    is_duration_field, is_interval_spec, is_letter_spec, is_number_spec, is_valid_number_spec,
+    normalize_spec, parse_duration_field, parse_line, resolve_check_interval, resolve_jitter,
+    spec_mark, split_url_line,
 )
 
 URL = 'https://live.douyin.com/277869507858'
@@ -344,6 +346,93 @@ class IntervalSpecWarningTest(unittest.TestCase):
     def test_invalid_spec_has_no_warning(self):
         self.assertIsNone(interval_spec_warning('1.5', self.INTERVALS))
         self.assertIsNone(interval_spec_warning(None, self.INTERVALS))
+
+
+class DurationMarkTest(unittest.TestCase):
+    """行内分段时长标记 `dur: 30m`：单位换算、关闭、非法值、与间隔标记共存。"""
+
+    def test_units_are_converted_to_seconds(self):
+        cases = {
+            'dur: 30m': 1800,
+            'dur:30m': 1800,
+            'dur:   30 m': 1800,
+            'DUR: 2H': 7200,
+            'dur：90s': 90,
+            'dur: 1.5h': 5400,
+            'dur: 0.5m': 30,
+            f'dur: {MIN_SEGMENT_SECONDS}s': MIN_SEGMENT_SECONDS,
+            'dur: 168h': MAX_SEGMENT_SECONDS,
+        }
+        for text, expected in cases.items():
+            info = parse_line(f'{URL},{text}', '原画')
+            self.assertEqual(info.duration, expected, text)
+            self.assertEqual(info.name, '', text)
+
+    def test_zero_and_off_disable_segment(self):
+        for text in ('dur: 0', 'dur: off', 'dur: OFF', 'dur: 关闭', 'DUR：0'):
+            info = parse_line(f'{URL},{text}', '原画')
+            self.assertEqual(info.duration, SEGMENT_DISABLED, text)
+
+    def test_invalid_values_are_stripped_and_reported(self):
+        """非法值不能污染主播名, 原文要留给调用方提示, 且按系统配置执行。"""
+        for text in ('dur: 30', 'dur: 30d', 'dur: abc', 'dur: 0s', 'dur: 0.5s',
+                     'dur: 200h', 'dur: 1h30m', 'dur:'):
+            info = parse_line(f'{URL},主播: 张三,{text}', '原画')
+            self.assertIsNone(info.duration, text)
+            self.assertEqual(info.name, '主播: 张三', text)
+            self.assertEqual(info.duration_raw, text, text)
+            self.assertIn('无法识别', duration_spec_warning(info.duration, info.duration_raw))
+
+    def test_multiple_marks_last_one_wins(self):
+        self.assertEqual(parse_line(f'{URL},dur: 10m,dur: 20m', '原画').duration, 1200)
+        self.assertEqual(parse_line(f'{URL},dur: 20m,dur: off', '原画').duration, SEGMENT_DISABLED)
+        info = parse_line(f'{URL},dur: 20m,dur: 30d', '原画')     # 最后一个非法 -> 按系统配置
+        self.assertIsNone(info.duration)
+        self.assertEqual(info.duration_raw, 'dur: 30d')
+
+    def test_mark_position_does_not_matter(self):
+        for line in (f'{URL},dur: 1h', f'dur: 1h,{URL}', f'原画，{URL}，dur: 1h'):
+            info = parse_line(line, '原画')
+            self.assertEqual(info.duration, 3600, line)
+            self.assertEqual(info.url, URL, line)
+            self.assertEqual(info.name, '', line)
+
+    def test_coexists_with_interval_mark_and_anchor(self):
+        info = parse_line(f'{URL},主播: MMA盼盼,A,dur: 30m', '原画')
+        self.assertEqual((info.url, info.name, info.spec, info.duration),
+                         (URL, '主播: MMA盼盼', 'A', 1800))
+        info = parse_line(f'{URL},dur: 45m,B', '原画')
+        self.assertEqual((info.spec, info.duration), ('B', 2700))
+
+    def test_compat_five_tuple_still_drops_duration(self):
+        quality, url, name, legacy, spec = split_url_line(f'{URL},主播: 张三,dur: 30m', '原画')
+        self.assertEqual((quality, url, name, legacy, spec),
+                         ('原画', URL, '主播: 张三', False, None))
+
+    def test_no_mark_means_system_config(self):
+        info = parse_line(f'{URL},主播: 张三', '原画')
+        self.assertIsNone(info.duration)
+        self.assertIsNone(info.duration_raw)
+        self.assertIsNone(duration_spec_warning(info.duration, info.duration_raw))
+
+    def test_field_predicates(self):
+        self.assertTrue(is_duration_field('dur: 30m'))
+        self.assertTrue(is_duration_field(' DUR：off '))
+        self.assertFalse(is_duration_field('30m'))
+        self.assertFalse(is_duration_field('主播: 张三'))
+        self.assertFalse(is_duration_field(None))
+        self.assertEqual(parse_duration_field('30m'), (False, None))
+        self.assertEqual(parse_duration_field('dur: 30m'), (True, 1800))
+        self.assertEqual(parse_duration_field('dur: off'), (True, SEGMENT_DISABLED))
+
+    def test_extract_duration_mark_returns_remaining_fields(self):
+        seconds, raw, remaining = extract_duration_mark([URL, '主播: 张三', 'dur: 15m'])
+        self.assertEqual((seconds, raw, remaining), (900, 'dur: 15m', [URL, '主播: 张三']))
+
+    def test_duration_mark_text(self):
+        self.assertEqual(duration_mark(' dur: 30m '), ',dur: 30m')
+        self.assertEqual(duration_mark(None), '')
+        self.assertEqual(duration_mark(''), '')
 
 
 if __name__ == '__main__':
