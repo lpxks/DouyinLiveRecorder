@@ -40,8 +40,9 @@ from ffmpeg_install import (
 from retry import retry_delay
 from src.flv_proxy import FLVProxy
 from url_parser import (LEGACY_PRIORITY_LEVEL, LEGACY_PRIORITY_MARK, LEVEL_DEFAULT,
-                        MIN_INTERVAL_SECONDS, dedup_marker_action, find_writeback_index,
-                        interval_spec_warning, resolve_check_interval, resolve_jitter,
+                        MIN_INTERVAL_SECONDS, dedup_marker_action, duration_mark,
+                        duration_spec_warning, find_writeback_index, interval_spec_warning,
+                        parse_line, resolve_check_interval, resolve_jitter,
                         spec_mark, split_url_line)
 
 version = "v4.0.7"
@@ -62,6 +63,8 @@ running_list = []
 url_tuples_list = []
 interval_spec_by_url = {}  # url -> 间隔标记(字母或秒数); 每轮解析后原子替换, 未标注不入表
 warned_interval_specs = set()  # 已提示过问题的间隔标记, 避免每轮解析重复刷屏
+duration_spec_by_url = {}  # url -> 分段秒数(0=该链接不分段); 每轮解析后原子替换, 未标注不入表
+warned_duration_specs = set()  # 已提示过问题的 dur 标记, 避免每轮解析重复刷屏
 url_comments = []
 text_no_repeat_url = []
 create_var = locals()
@@ -112,6 +115,8 @@ def display_info() -> None:
                 print(f"录制分段开启: {split_time}秒", end=" | ")
             else:
                 print("录制分段开启: 否", end=" | ")
+            if duration_spec_by_url:
+                print(f"自定义分段链接: {len(duration_spec_by_url)}条", end=" | ")
             if create_time_file:
                 print("是否生成时间文件: 是", end=" | ")
             print(f"录制视频质量为: {video_record_quality}", end=" | ")
@@ -432,7 +437,12 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
 
 
 def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
-                     script_command: str | None = None) -> bool:
+                     script_command: str | None = None, segment_enabled: bool = False) -> bool:
+    """等待 ffmpeg 录制进程结束并做后处理。
+
+    segment_enabled 是这条链接实际生效的分段开关(可能被行内 dur: 标记覆盖)，
+    不能用全局 split_video_by_time——否则按链接关闭分段时后处理会去按 %03d 找文件。
+    """
     save_file_path = ffmpeg_command[-1]
     process = subprocess.Popen(
         ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
@@ -440,7 +450,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
 
     subs_file_path = save_file_path.rsplit('.', maxsplit=1)[0]
     subs_thread_name = f'subs_{Path(subs_file_path).name}'
-    if create_time_file and not split_video_by_time and '音频' not in save_type:
+    if create_time_file and not segment_enabled and '音频' not in save_type:
         create_var[subs_thread_name] = threading.Thread(
             target=generate_subtitles, args=(record_name, subs_file_path)
         )
@@ -466,7 +476,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
     stop_time = time.strftime('%Y-%m-%d %H:%M:%S')
     if return_code == 0:
         if converts_to_mp4 and save_type == 'TS':
-            if split_video_by_time:
+            if segment_enabled:
                 file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
                 prefix = os.path.basename(save_file_path).rsplit('_', maxsplit=1)[0]
                 for path in file_paths:
@@ -483,7 +493,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
                     f'--record_name "{record_name}"',
                     f'--save_file_path "{save_file_path}"',
                     f'--save_type {save_type}',
-                    f'--split_video_by_time {split_video_by_time}',
+                    f'--split_video_by_time {segment_enabled}',
                     f'--converts_to_mp4 {converts_to_mp4}',
                 ]
             else:
@@ -491,7 +501,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
                     f'"{record_name.split(" ", maxsplit=1)[-1]}"',
                     f'"{save_file_path}"',
                     save_type,
-                    f'split_video_by_time:{split_video_by_time}',
+                    f'split_video_by_time:{segment_enabled}',
                     f'converts_to_mp4:{converts_to_mp4}'
                 ]
             script_command = script_command.strip() + ' ' + ' '.join(params)
@@ -1422,15 +1432,23 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         logger.warning("FLV is not supported for h265 codec, use TS format instead")
                                         record_save_type = "TS"
 
+                                # 该链接实际生效的分段设置: 行内 dur: 标记优先于全局配置
+                                seg_enabled, seg_seconds = resolve_record_segment(
+                                    record_url, split_video_by_time, split_seconds_default)
+                                if duration_spec_by_url.get(record_url) is not None:
+                                    seg_label = '关闭' if not seg_enabled else _format_segment_seconds(seg_seconds)
+                                    logger.info(f"{anchor_name} 使用自定义分段: {seg_label}")
+                                    print(f"\r{anchor_name} 使用自定义分段: {seg_label}")
+
                                 if only_audio_record or any(i in record_save_type for i in ['MP3', 'M4A']):
                                     try:
                                         now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
                                         extension = "mp3" if "m4a" not in record_save_type.lower() else "m4a"
-                                        name_format = "_%03d" if split_video_by_time else ""
+                                        name_format = "_%03d" if seg_enabled else ""
                                         save_file_path = (f"{full_path}/{anchor_name}_{title_in_name}{now}"
                                                           f"{name_format}.{extension}")
 
-                                        if split_video_by_time:
+                                        if seg_enabled:
                                             print(f'\r{anchor_name} 准备开始录制音频: {save_file_path}')
 
                                             if "MP3" in record_save_type:
@@ -1439,7 +1457,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                     "-c:a", "libmp3lame",
                                                     "-ab", "320k",
                                                     "-f", "segment",
-                                                    "-segment_time", split_time,
+                                                    "-segment_time", str(seg_seconds),
                                                     "-reset_timestamps", "1",
                                                     save_file_path,
                                                 ]
@@ -1450,7 +1468,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                     "-bsf:a", "aac_adtstoasc",
                                                     "-ab", "320k",
                                                     "-f", "segment",
-                                                    "-segment_time", split_time,
+                                                    "-segment_time", str(seg_seconds),
                                                     "-segment_format", 'mpegts',
                                                     "-reset_timestamps", "1",
                                                     save_file_path,
@@ -1481,7 +1499,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            seg_enabled
                                         )
                                         if comment_end:
                                             if flv_proxy:
@@ -1547,7 +1566,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     save_file_path = full_path + '/' + filename
 
                                     try:
-                                        if split_video_by_time:
+                                        if seg_enabled:
                                             now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
                                             save_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.flv"
                                             command = [
@@ -1556,7 +1575,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 "-c:a", "copy",
                                                 "-bsf:a", "aac_adtstoasc",
                                                 "-f", "segment",
-                                                "-segment_time", split_time,
+                                                "-segment_time", str(seg_seconds),
                                                 "-segment_format", "flv",
                                                 "-reset_timestamps", "1",
                                                 save_file_path
@@ -1578,7 +1597,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            seg_enabled
                                         )
                                         if comment_end:
                                             if flv_proxy:
@@ -1595,10 +1615,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     try:
                                         if converts_to_mp4:
                                             seg_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.mp4"
-                                            if split_video_by_time:
+                                            if seg_enabled:
                                                 segment_video(
                                                     save_file_path, seg_file_path,
-                                                    segment_format='mp4', segment_time=split_time,
+                                                    segment_format='mp4', segment_time=str(seg_seconds),
                                                     is_original_delete=delete_origin_file
                                                 )
                                             else:
@@ -1609,10 +1629,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                                         else:
                                             seg_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.flv"
-                                            if split_video_by_time:
+                                            if seg_enabled:
                                                 segment_video(
                                                     save_file_path, seg_file_path,
-                                                    segment_format='flv', segment_time=split_time,
+                                                    segment_format='flv', segment_time=str(seg_seconds),
                                                     is_original_delete=delete_origin_file
                                                 )
                                     except Exception as e:
@@ -1624,7 +1644,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     save_file_path = full_path + '/' + filename
 
                                     try:
-                                        if split_video_by_time:
+                                        if seg_enabled:
                                             now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
                                             save_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.mkv"
                                             command = [
@@ -1633,7 +1653,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 "-c:a", "aac",
                                                 "-map", "0",
                                                 "-f", "segment",
-                                                "-segment_time", split_time,
+                                                "-segment_time", str(seg_seconds),
                                                 "-segment_format", "matroska",
                                                 "-reset_timestamps", "1",
                                                 save_file_path,
@@ -1655,7 +1675,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            seg_enabled
                                         )
                                         if comment_end:
                                             if flv_proxy:
@@ -1675,7 +1696,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     save_file_path = full_path + '/' + filename
 
                                     try:
-                                        if split_video_by_time:
+                                        if seg_enabled:
                                             now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
                                             save_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.mp4"
                                             command = [
@@ -1683,7 +1704,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 "-c:a", "aac",
                                                 "-map", "0",
                                                 "-f", "segment",
-                                                "-segment_time", split_time,
+                                                "-segment_time", str(seg_seconds),
                                                 "-segment_format", "mp4",
                                                 "-reset_timestamps", "1",
                                                 "-movflags", "+frag_keyframe+empty_moov",
@@ -1705,7 +1726,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            seg_enabled
                                         )
                                         if comment_end:
                                             if flv_proxy:
@@ -1720,7 +1742,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             error_window.append(1)
 
                                 else:
-                                    if split_video_by_time:
+                                    if seg_enabled:
                                         now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
                                         filename = anchor_name + f'_{title_in_name}' + now + ".ts"
                                         print(f'{rec_info}/{filename}')
@@ -1732,7 +1754,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 "-c:a", "copy",
                                                 "-map", "0",
                                                 "-f", "segment",
-                                                "-segment_time", split_time,
+                                                "-segment_time", str(seg_seconds),
                                                 "-segment_format", 'mpegts',
                                                 "-reset_timestamps", "1",
                                                 save_file_path,
@@ -1744,7 +1766,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                seg_enabled
                                             )
                                             if comment_end:
                                                 if converts_to_mp4:
@@ -1791,7 +1814,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                seg_enabled
                                             )
                                             if comment_end:
                                                 threading.Thread(
@@ -1998,6 +2022,44 @@ def _parse_interval_seconds(raw_value, default_seconds: int) -> int:
     return seconds if seconds >= MIN_INTERVAL_SECONDS else default_seconds
 
 
+def _parse_segment_seconds(raw_value, default_seconds: int = 1800) -> int:
+    """配置里的分段时间(秒): 非数字/非正数时回退 default_seconds。
+
+    ffmpeg 的 -segment_time 写坏(空/字母/0)会让整条录制命令失败, 这里统一兜底。
+    """
+    try:
+        seconds = int(float(str(raw_value).strip()))
+    except (TypeError, ValueError):
+        seconds = 0
+    return seconds if seconds > 0 else default_seconds
+
+
+def _format_segment_seconds(seconds: int) -> str:
+    """分段秒数 → 易读文本(30m / 1h / 90s)，只用于提示与日志。"""
+    seconds = int(seconds)
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f'{seconds // 3600}h'
+    if seconds >= 60 and seconds % 60 == 0:
+        return f'{seconds // 60}m'
+    return f'{seconds}s'
+
+
+def resolve_record_segment(record_url: str, default_enabled: bool, default_seconds: int) -> tuple:
+    """该链接实际生效的分段设置，返回 (是否分段, 分段秒数)。
+
+    行内 `dur:` 标记优先于 config.ini 的全局设置:
+      - 没写 dur            -> 完全按全局 `分段录制是否开启` / `视频分段时间(秒)`
+      - dur 是正数          -> 该链接分段, 用标记里的秒数(即使全局开关是"否")
+      - dur 是 0(off/关闭)  -> 该链接不分段(即使全局开关是"是")
+    """
+    custom = duration_spec_by_url.get(record_url)
+    if custom is None:
+        return bool(default_enabled), default_seconds
+    if custom <= 0:
+        return False, default_seconds
+    return True, custom
+
+
 def read_level_intervals(config_parser: configparser.RawConfigParser) -> dict:
     """读取 [检查时长等级] 段里所有字母的轮询检查间隔(秒)。
 
@@ -2098,7 +2160,8 @@ while True:
     split_video_by_time = options.get(read_config_value(config, '录制设置', '分段录制是否开启', "否"), False)
     enable_https_recording = options.get(read_config_value(config, '录制设置', '是否强制启用https录制', "否"), False)
     disk_space_limit = float(read_config_value(config, '录制设置', '录制空间剩余阈值(gb)', 1.0))
-    split_time = str(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800))
+    split_time = str(_parse_segment_seconds(read_config_value(config, '录制设置', '视频分段时间(秒)', 1800)))
+    split_seconds_default = int(split_time)  # 未写 dur 标记的链接用这个秒数
     max_retry_interrupted = int(read_config_value(config, '录制设置', '直播断流重试次数', 10))
     level_intervals = read_level_intervals(config)
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
@@ -2229,6 +2292,7 @@ while True:
 
         # 一次性读取所有行到内存
         new_interval_spec_by_url = {}
+        new_duration_spec_by_url = {}
         with open(url_config_file, "r", encoding=text_encoding, errors='ignore') as file:
             raw_lines = file.readlines()
 
@@ -2271,8 +2335,10 @@ while True:
             if is_comment:
                 line = line.lstrip('#')
 
-            quality, url, name, has_legacy_priority, spec = split_url_line(
-                line, video_record_quality)
+            parsed = parse_line(line, video_record_quality)
+            quality, url, name = parsed.quality, parsed.url, parsed.name
+            has_legacy_priority, spec = parsed.has_legacy_priority, parsed.spec
+            duration, duration_raw = parsed.duration, parsed.duration_raw
 
             if has_legacy_priority:
                 # 旧版 ",优先: 是" 标记迁移为等级 A(显式标记优先, 只丢弃旧标记);
@@ -2296,6 +2362,13 @@ while True:
                 warned_interval_specs.add(spec)
                 color_obj.print_colored(f"\r{url} 的间隔标记 {spec}: {spec_warning}", color_obj.YELLOW)
                 logger.warning(f"间隔标记 {spec}: {spec_warning} ({url})")
+
+            # 分段标记写错(缺单位/单位不支持/超范围)时提示一次, 该链接按系统配置分段
+            duration_warning = duration_spec_warning(duration, duration_raw)
+            if duration_warning and duration_raw not in warned_duration_specs:
+                warned_duration_specs.add(duration_raw)
+                color_obj.print_colored(f"\r{url} 的分段标记 {duration_raw}: {duration_warning}", color_obj.YELLOW)
+                logger.warning(f"分段标记 {duration_raw}: {duration_warning} ({url})")
 
             url = 'https://' + url if '://' not in url else url
             url_host = url.split('/')[2]
@@ -2445,11 +2518,16 @@ while True:
                             url_comments = [i for i in url_comments if i != url]
                             url_tuples_list.append((quality, url, name))
                             new_interval_spec_by_url[url] = spec
+                            # 分段时长取这条生效行自己的(注释行上的 dur 只是暂停标注, 不激活)
+                            if duration is not None:
+                                new_duration_spec_by_url[url] = duration
                             # 去重基准切换到新增生效行，后续生效行重复按其去重
                             seen_url_info[url] = {
                                 'is_comment': False,
                                 'has_marker': spec is not None,
                                 'spec': spec,
+                                'duration': duration,
+                                'duration_raw': duration_raw,
                                 'output_idx': len(output_lines) - 1,
                             }
                         else:
@@ -2466,9 +2544,20 @@ while True:
                         url_comments = [i for i in url_comments if i != url]
                         url_tuples_list.append((quality, url, name))
                         first_info['is_comment'] = False
-                    # 去重后按保留行决定间隔标记（含合并标记后立即生效）
+                    # 保留行没写 dur、被丢弃的生效行写了 → 合并进保留行(注释行上的 dur 不激活)
+                    if not is_comment and first_info.get('duration') is None and duration is not None:
+                        kept_line = output_lines[first_info['output_idx']]
+                        body = kept_line.rstrip('\n\r')
+                        suffix = kept_line[len(body):]
+                        output_lines[first_info['output_idx']] = body + duration_mark(duration_raw) + suffix
+                        first_info['duration'] = duration
+                        first_info['duration_raw'] = duration_raw
+                        file_modified = True
+                    # 去重后按保留行决定间隔/分段标记（含合并标记后立即生效）
                     if first_info.get('has_marker', False) and not first_info['is_comment']:
                         new_interval_spec_by_url[url] = first_info.get('spec')
+                    if first_info.get('duration') is not None and not first_info['is_comment']:
+                        new_duration_spec_by_url[url] = first_info['duration']
                     # 所有重复情况：删除新行，保留第一条
                     file_modified = True
                     continue
@@ -2478,6 +2567,8 @@ while True:
                     'is_comment': is_comment,
                     'has_marker': spec is not None,
                     'spec': spec,
+                    'duration': duration,
+                    'duration_raw': duration_raw,
                     'output_idx': len(output_lines)
                 }
 
@@ -2493,6 +2584,8 @@ while True:
                     new_line = (quality, url, name)
                     url_tuples_list.append(new_line)
                     new_interval_spec_by_url[url] = spec
+                    if duration is not None:
+                        new_duration_spec_by_url[url] = duration
             else:
                 # 未知链接，注释掉
                 if not is_comment:
@@ -2504,6 +2597,7 @@ while True:
 
         # 解析完成后一次性替换间隔标记映射，避免解析期间线程看到半成品
         interval_spec_by_url = new_interval_spec_by_url
+        duration_spec_by_url = new_duration_spec_by_url
 
         # 处理need_update_line_list
         while len(need_update_line_list):
@@ -2561,6 +2655,11 @@ while True:
                         spec_desc = f'行内间隔{link_seconds}秒'
                     else:
                         spec_desc = f'{spec_label} 检查间隔{link_seconds}秒'
+                    link_duration = duration_spec_by_url.get(url_tuple[1])
+                    if link_duration is not None:
+                        seg_label = ('不分段' if link_duration <= 0
+                                     else f'分段{_format_segment_seconds(link_duration)}')
+                        spec_desc = f'{spec_desc}, {seg_label}'
                     print(f"\r{'新增' if not first_start else '传入'}地址: {url_tuple[1]} "
                           f"({spec_desc})")
                     monitoring += 1

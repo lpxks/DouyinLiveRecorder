@@ -266,8 +266,10 @@ class MainWiringTest(unittest.TestCase):
         self.assertRegex(self.source, r'if has_legacy_priority:[\s\S]{0,2000}file_modified = True')
         self.assertIn('origin_line.replace(LEGACY_PRIORITY_MARK', self.source)
 
-    def test_split_url_line_unpacked_into_five_values(self):
-        self.assertIn('quality, url, name, has_legacy_priority, spec = split_url_line(', self.source)
+    def test_parse_line_used_for_full_fields(self):
+        """主循环改用 parse_line 取全字段(含分段时长); 旧的五元组入口仍供写回定位使用。"""
+        self.assertIn('parsed = parse_line(', self.source)
+        self.assertIn('split_url_line(', self.source)
 
     def test_interval_config_read_from_dedicated_section(self):
         self.assertIn('read_level_intervals(config)', self.source)
