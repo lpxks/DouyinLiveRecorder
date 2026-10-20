@@ -38,6 +38,7 @@ from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
 from retry import retry_delay
+from ffmpeg_guard import EMPTY_OUTPUT_TIMEOUT, FfmpegOutputGuard, output_bytes
 from src.flv_proxy import FLVProxy
 from url_parser import (LEGACY_PRIORITY_LEVEL, LEGACY_PRIORITY_MARK, LEVEL_DEFAULT,
                         MIN_INTERVAL_SECONDS, dedup_marker_action, duration_mark,
@@ -445,8 +446,20 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
     """
     save_file_path = ffmpeg_command[-1]
     process = subprocess.Popen(
-        ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
+        ffmpeg_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        startupinfo=get_startup_info(os_type)
     )
+
+    # 接管 ffmpeg 输出: 正常日志限流落盘, 日志风暴/长时间空输出直接终止进程。
+    # 背景见 ffmpeg_guard 模块文档(ffmpeg 6.1 的 REDO 重试循环会刷屏并打满 CPU)。
+    guard = FfmpegOutputGuard(
+        process,
+        log_path=f'{script_path}/logs/ffmpeg.log',
+        storm_path=f'{script_path}/logs/ffmpeg_storm.log',
+        label=record_name,
+        detail=f'out={save_file_path}',
+    )
+    guard.start()
 
     subs_file_path = save_file_path.rsplit('.', maxsplit=1)[0]
     subs_thread_name = f'subs_{Path(subs_file_path).name}'
@@ -457,22 +470,50 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
         create_var[subs_thread_name].daemon = True
         create_var[subs_thread_name].start()
 
+    start_time = time.time()
+    empty_checked = False
     while process.poll() is None:
         if record_url in url_comments or exit_recording:
             color_obj.print_colored(f"[{record_name}]录制时已被注释,本条线程将会退出", color_obj.YELLOW)
             clear_record_info(record_name, record_url)
             # process.terminate()
-            if os.name == 'nt':
-                if process.stdin:
-                    process.stdin.write(b'q')
-                    process.stdin.close()
-            else:
-                process.send_signal(signal.SIGINT)
+            try:
+                if os.name == 'nt':
+                    if process.stdin:
+                        process.stdin.write(b'q')
+                        process.stdin.close()
+                else:
+                    process.send_signal(signal.SIGINT)
+            except OSError:
+                pass
             process.wait()
+            guard.join(3)
             return True
+        if not empty_checked and time.time() - start_time >= EMPTY_OUTPUT_TIMEOUT:
+            empty_checked = True
+            if output_bytes(save_file_path) == 0:
+                guard.mark_no_output()
+                logger.warning(f'{record_name} 开录 {EMPTY_OUTPUT_TIMEOUT} 秒仍无任何输出, 终止 ffmpeg 并重试')
+                try:
+                    process.kill()
+                except OSError:
+                    pass
         time.sleep(1)
 
+    guard.join(3)
     return_code = process.returncode
+
+    if guard.storm:
+        color_obj.print_colored(
+            f"\n{record_name} ffmpeg 日志风暴({guard.total_lines}行, 已终止), 稍后重试\n", color_obj.RED)
+        logger.warning(
+            f'{record_name} ffmpeg 日志风暴: 共 {guard.total_lines} 行, 现场见 logs/ffmpeg_storm.log')
+        recording.discard(record_name)
+        return False
+    if guard.no_output:
+        color_obj.print_colored(f"\n{record_name} 长时间无输出, 已终止并重试\n", color_obj.RED)
+        recording.discard(record_name)
+        return False
     stop_time = time.strftime('%Y-%m-%d %H:%M:%S')
     if return_code == 0:
         if converts_to_mp4 and save_type == 'TS':
@@ -1362,6 +1403,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-rw_timeout", rw_timeout,
                                     "-loglevel", "error",
                                     "-hide_banner",
+                                    "-nostats",
                                     "-user_agent", user_agent,
                                     "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
                                     "-thread_queue_size", "1024",
