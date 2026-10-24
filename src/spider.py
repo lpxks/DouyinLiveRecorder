@@ -16,6 +16,7 @@ import re
 import json
 from .utils import logger, trace_error_decorator
 from .http_clients.async_http import async_req
+from . import tiktok_fetch
 import streamget
 
 
@@ -78,8 +79,9 @@ async def get_douyin_app_stream_data(url, proxy_addr=None, cookies=None, video_q
 async def get_tiktok_stream_data(url, proxy_addr=None, cookies=None, video_quality=None) -> dict:
     try:
         live_stream = streamget.TikTokLiveStream(proxy_addr=proxy_addr, cookies=cookies)
-        json_data = await live_stream.fetch_web_stream_data(url)
-        return _stream_data_to_dict(await live_stream.fetch_stream_url(json_data, video_quality))
+        # 移动端 API 优先: 机房 IP 下网页会被 SlardarWAF 挑战页拦住, 详见 tiktok_fetch
+        stream_data = await tiktok_fetch.get_stream_data(live_stream, url, video_quality)
+        return _stream_data_to_dict(stream_data)
     except Exception as e:
         logger.error(f"get_tiktok_stream_data failed: {url}, {type(e).__name__}: {e}")
         return {"anchor_name": "", "is_live": False}
