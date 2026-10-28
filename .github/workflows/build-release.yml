@@ -110,6 +110,15 @@ jobs:
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
 
+          # ffprobe — src/file_organizer.py 用它判断录像时长(缺失时退回解析 ffmpeg -i);
+          # 放在 ffmpeg.exe 同目录, 运行时该目录已在 PATH 里
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          } else {
+            Write-Warning "ffprobe.exe not found in the FFmpeg bundle; file organizer will fall back to parsing ffmpeg -i"
+          }
+
           # node — node/ dir (src/__init__.py adds ./node/ to PATH)
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
@@ -193,6 +202,14 @@ jobs:
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+
+          # ffprobe — 与 ffmpeg.exe 同目录, 供 src/file_organizer.py 判断录像时长
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          } else {
+            Write-Warning "ffprobe.exe not found in the FFmpeg bundle; file organizer will fall back to parsing ffmpeg -i"
+          }
 
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
@@ -298,6 +315,14 @@ jobs:
           $ffmpegExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -Force -ItemType Directory "$dist/ffmpeg" | Out-Null
           Copy-Item $ffmpegExe.FullName "$dist/ffmpeg/ffmpeg.exe"
+
+          # ffprobe — 与 ffmpeg.exe 同目录, 供 src/file_organizer.py 判断录像时长
+          $ffprobeExe = Get-ChildItem -Recurse ffmpeg_bundle -Filter ffprobe.exe | Select-Object -First 1
+          if ($ffprobeExe) {
+            Copy-Item $ffprobeExe.FullName "$dist/ffmpeg/ffprobe.exe"
+          } else {
+            Write-Warning "ffprobe.exe not found in the FFmpeg bundle; file organizer will fall back to parsing ffmpeg -i"
+          }
 
           Copy-Item -Recurse node/* "$dist/node/" -Force -ErrorAction SilentlyContinue
 
