@@ -31,6 +31,7 @@ from src import spider
 from src.proxy import ProxyDetector
 from src.utils import logger
 from src import utils
+from src import file_organizer
 from msg_push import (
     dingtalk, xizhi, tg_bot, send_email, bark, ntfy, pushplus
 )
@@ -206,6 +207,7 @@ def get_startup_info(system_type: str):
 
 def segment_video(converts_file_path: str, segment_save_file_path: str, segment_format: str, segment_time: str,
                   is_original_delete: bool = True) -> None:
+    file_organizer.register_busy_file(converts_file_path)
     try:
         if os.path.exists(converts_file_path) and os.path.getsize(converts_file_path) > 0:
             ffmpeg_command = [
@@ -232,9 +234,12 @@ def segment_video(converts_file_path: str, segment_save_file_path: str, segment_
         logger.error(f'Error occurred during conversion: {e}')
     except Exception as e:
         logger.error(f'An unknown error occurred: {e}')
+    finally:
+        file_organizer.unregister_busy_file(converts_file_path)
 
 
 def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> None:
+    file_organizer.register_busy_file(converts_file_path)
     try:
         if os.path.exists(converts_file_path) and os.path.getsize(converts_file_path) > 0:
             if converts_to_h264:
@@ -267,9 +272,12 @@ def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> No
         logger.error(f'Error occurred during conversion: {e}')
     except Exception as e:
         logger.error(f'An unknown error occurred: {e}')
+    finally:
+        file_organizer.unregister_busy_file(converts_file_path)
 
 
 def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> None:
+    file_organizer.register_busy_file(converts_file_path)
     try:
         if os.path.exists(converts_file_path) and os.path.getsize(converts_file_path) > 0:
             _output = subprocess.check_output([
@@ -286,6 +294,8 @@ def converts_m4a(converts_file_path: str, is_original_delete: bool = True) -> No
         logger.error(f'Error occurred during conversion: {e}')
     except Exception as e:
         logger.error(f'An unknown error occurred: {e}')
+    finally:
+        file_organizer.unregister_busy_file(converts_file_path)
 
 
 def generate_subtitles(record_name: str, ass_filename: str, sub_format: str = 'srt') -> None:
@@ -402,6 +412,7 @@ def clear_record_info(record_name: str, record_url: str) -> None:
 
 def direct_download_stream(source_url: str, save_path: str, record_name: str, live_url: str, platform: str,
                            proxy_addr: str | None = None) -> bool:
+    file_organizer.register_busy_file(save_path)
     try:
         with open(save_path, 'wb') as f:
             client = httpx.Client(timeout=None, proxy=proxy_addr)
@@ -435,6 +446,8 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
     except Exception as e:
         logger.error(f"FLV下载错误: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
         return False
+    finally:
+        file_organizer.unregister_busy_file(save_path)
 
 
 def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
@@ -443,7 +456,22 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
 
     segment_enabled 是这条链接实际生效的分段开关(可能被行内 dur: 标记覆盖)，
     不能用全局 split_video_by_time——否则按链接关闭分段时后处理会去按 %03d 找文件。
+
+    录制期间把输出目录登记为 busy, 自动整理线程不会搬走正在写入/分段的文件。
     """
+    save_file_path = ffmpeg_command[-1]
+    busy_dir = os.path.dirname(save_file_path) or '.'
+    file_organizer.register_busy_dir(busy_dir)
+    try:
+        return _check_subprocess(
+            record_name, record_url, ffmpeg_command, save_type, script_command, segment_enabled
+        )
+    finally:
+        file_organizer.unregister_busy_dir(busy_dir)
+
+
+def _check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
+                      script_command: str | None = None, segment_enabled: bool = False) -> bool:
     save_file_path = ffmpeg_command[-1]
     process = subprocess.Popen(
         ffmpeg_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2183,6 +2211,25 @@ while True:
         logger.error(f"发生 I/O 错误: {err}")
 
     video_save_path = read_config_value(config, '录制设置', '直播保存路径(不填则默认)', "")
+    organizer_enabled = options.get(
+        read_config_value(config, '文件整理', '自动整理是否开启(是/否)', "否"), False)
+    organizer_source = read_config_value(config, '文件整理', '整理源目录(留空则用直播保存路径)', "")
+    organizer_target = read_config_value(config, '文件整理', '归档目标目录(留空则不归档)', "")
+    # 每轮重建配置快照; 首次 enabled=True 时 file_organizer 懒启动整理线程
+    file_organizer.update_settings(file_organizer.OrganizerSettings(
+        enabled=organizer_enabled,
+        interval_seconds=file_organizer.parse_interval_minutes(
+            read_config_value(config, '文件整理', '整理间隔(分钟)', file_organizer.DEFAULT_INTERVAL_MINUTES)
+        ) * 60,
+        source_dir=organizer_source or video_save_path or default_path,
+        target_dir=organizer_target,
+        min_duration_seconds=file_organizer.parse_min_duration_seconds(
+            read_config_value(config, '文件整理', '删除小于该时长的视频(秒)', 0)
+        ),
+        grace_seconds=file_organizer.parse_grace_seconds(
+            read_config_value(config, '文件整理', '写入宽限期(秒)', file_organizer.DEFAULT_GRACE_SECONDS)
+        ),
+    ))
     folder_by_platform = options.get(read_config_value(config, '录制设置', '保存文件夹是否以平台区分', "是"), True)
     folder_by_author = options.get(read_config_value(config, '录制设置', '保存文件夹是否以作者区分', "是"), False)
     folder_by_time = options.get(read_config_value(config, '录制设置', '保存文件夹是否以时间区分', "否"), False)
