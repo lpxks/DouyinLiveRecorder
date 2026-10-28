@@ -395,7 +395,7 @@ def _probe_with_ffprobe(exe: str, path, timeout: float) -> float | None:
         result = subprocess.run(
             [exe, '-v', 'error', '-show_entries', 'format=duration:stream=duration',
              '-of', 'json', str(path)],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, errors='replace', timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -421,7 +421,7 @@ def _probe_with_ffmpeg(path, timeout: float) -> float | None:
     try:
         result = subprocess.run(
             [ffmpeg, '-hide_banner', '-nostdin', '-i', str(path)],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, errors='replace', timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
