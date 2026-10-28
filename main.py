@@ -2226,6 +2226,9 @@ while True:
         min_duration_seconds=file_organizer.parse_min_duration_seconds(
             read_config_value(config, '文件整理', '删除小于该时长的视频(秒)', 0)
         ),
+        min_size_bytes=file_organizer.parse_min_size_mb(
+            read_config_value(config, '文件整理', '删除小于该大小的视频(MB)', file_organizer.DEFAULT_MIN_SIZE_MB)
+        ),
         grace_seconds=file_organizer.parse_grace_seconds(
             read_config_value(config, '文件整理', '写入宽限期(秒)', file_organizer.DEFAULT_GRACE_SECONDS)
         ),

@@ -33,14 +33,18 @@ AUDIO_EXTENSIONS = frozenset({'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'mka'})
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
 DEFAULT_LOOP_TICK_SECONDS = 1.0
+START_RETRY_SECONDS = 60  # 线程起不来时的重试间隔(避免每轮主循环都重试并刷日志)
 DEFAULT_INTERVAL_MINUTES = 60
 MIN_INTERVAL_MINUTES = 1
 MAX_INTERVAL_MINUTES = 7 * 24 * 60  # 7 天
 DEFAULT_MIN_DURATION_SECONDS = 0.0
 MAX_MIN_DURATION_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_MIN_SIZE_MB = 2.0
+MAX_MIN_SIZE_MB = 100 * 1024  # 100 GB
 DEFAULT_GRACE_SECONDS = 120
 MAX_GRACE_SECONDS = 24 * 60 * 60
 PROBE_TIMEOUT_SECONDS = 30
+BYTES_PER_MB = 1024 * 1024
 
 _DURATION_LINE_RE = re.compile(r'Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)')
 
@@ -58,6 +62,7 @@ class OrganizerSettings:
     source_dir: str = ''
     target_dir: str = ''
     min_duration_seconds: float = DEFAULT_MIN_DURATION_SECONDS
+    min_size_bytes: int = 0
     grace_seconds: int = DEFAULT_GRACE_SECONDS
 
 
@@ -78,6 +83,7 @@ class OrganizeReport:
 _settings_lock = threading.Lock()
 _settings = OrganizerSettings()
 _loop_thread: threading.Thread | None = None
+_last_start_attempt = 0.0
 _warned_once: set = set()
 _warned_once_lock = threading.Lock()
 
@@ -128,6 +134,18 @@ def parse_min_duration_seconds(raw, default: float = DEFAULT_MIN_DURATION_SECOND
     return min(MAX_MIN_DURATION_SECONDS, max(0.0, value))
 
 
+def parse_min_size_mb(raw, default: float = DEFAULT_MIN_SIZE_MB) -> int:
+    """按大小删除的阈值(MB): 0 = 不按大小删除; 返回字节数, 上限 100 GB。"""
+    value = _to_float(raw)
+    if value is None:
+        _warn_once(
+            ('min_size', str(raw)),
+            f'[文件整理] 删除小于该大小的视频(MB) 的值无效({raw}), 按默认 {default:g} MB',
+        )
+        value = default
+    return int(min(MAX_MIN_SIZE_MB, max(0.0, value)) * BYTES_PER_MB)
+
+
 def parse_grace_seconds(raw, default: int = DEFAULT_GRACE_SECONDS) -> int:
     """写入宽限期(秒): 文件 mtime 在此范围内视为仍在写入。"""
     value = _to_float(raw)
@@ -158,31 +176,45 @@ def update_settings(settings: OrganizerSettings) -> bool:
         source_dir=(settings.source_dir or '').strip(),
         target_dir=(settings.target_dir or '').strip(),
         min_duration_seconds=min(MAX_MIN_DURATION_SECONDS, max(0.0, float(settings.min_duration_seconds))),
+        min_size_bytes=int(min(MAX_MIN_SIZE_MB * BYTES_PER_MB, max(0, int(settings.min_size_bytes)))),
         grace_seconds=int(min(MAX_GRACE_SECONDS, max(0, int(settings.grace_seconds)))),
     )
     with _settings_lock:
         previous = _settings
         _settings = normalized
-    if normalized != previous and (normalized.enabled or previous.enabled):
+    changed = normalized != previous
+    if changed and (normalized.enabled or previous.enabled):
         logger.info(
             f"文件整理配置: {'开启' if normalized.enabled else '关闭'}, "
             f"间隔 {normalized.interval_seconds // 60} 分钟, "
             f"源 {normalized.source_dir or '(未设置)'}, "
             f"归档 {normalized.target_dir or '(不归档)'}, "
-            f"删除小于 {normalized.min_duration_seconds:g} 秒, "
+            f"删除小于 {normalized.min_duration_seconds:g} 秒"
+            f"或 {normalized.min_size_bytes / BYTES_PER_MB:g} MB, "
             f"宽限 {normalized.grace_seconds} 秒"
         )
     if normalized.enabled:
-        start_organizer_thread()
-    return normalized != previous
+        # 线程创建失败(如进程线程耗尽)不能让主循环崩掉, 整理只是附带功能
+        try:
+            start_organizer_thread()
+        except Exception as err:
+            logger.error(f'文件整理线程启动失败: {err}')
+    return changed
 
 
 def start_organizer_thread() -> None:
-    """幂等启动整理线程(第一次启用时才创建)。"""
-    global _loop_thread
+    """幂等启动整理线程(第一次启用时才创建)。
+
+    线程创建失败(如线程耗尽)后 60 秒内不再重试, 避免主循环每轮都尝试并刷日志。
+    """
+    global _loop_thread, _last_start_attempt
     with _settings_lock:
         if _loop_thread is not None and _loop_thread.is_alive():
             return
+        now = time.monotonic()
+        if now - _last_start_attempt < START_RETRY_SECONDS:
+            return
+        _last_start_attempt = now
         _loop_thread = threading.Thread(target=_organizer_loop, name='file-organizer', daemon=True)
         _loop_thread.start()
 
@@ -207,7 +239,7 @@ def _organizer_loop() -> None:
                         logger.info(
                             f"文件整理完成: 扁平化 {report.moved_to_root} 个, "
                             f"删除空目录 {report.removed_dirs} 个, "
-                            f"删除短视频 {report.deleted_short} 个, "
+                            f"删除短视频/小文件 {report.deleted_short} 个, "
                             f"归档 {report.archived} 个"
                         )
                     else:
@@ -505,8 +537,12 @@ def _resolved_target(settings: OrganizerSettings) -> str:
 
 
 def _excluded_dir(path, source: str, target: str) -> bool:
-    """源目录内部的归档目标子树不参与扫描/删除。"""
-    if not target:
+    """源目录内部的归档目标子树不参与扫描/删除。
+
+    目标目录等于源目录时(只归档到原地)不能排除整个源目录, 否则扁平化和
+    空目录清理都会被跳过; 只有"目标严格位于源内部"才排除。
+    """
+    if not target or _same_path(target, source):
         return False
     return _is_within(target, source) and _is_within(path, target)
 
@@ -577,8 +613,8 @@ def remove_empty_dirs(source_dir, settings: OrganizerSettings, report: OrganizeR
 
 
 def delete_short_media(source_dir, settings: OrganizerSettings, report: OrganizeReport) -> None:
-    """删除源根目录直属的、时长小于阈值的媒体文件; 时长未知则保留。"""
-    if settings.min_duration_seconds <= 0:
+    """删除源根目录直属的过小/过短的媒体文件(按大小优先, 再按时长); 时长未知则保留。"""
+    if settings.min_duration_seconds <= 0 and settings.min_size_bytes <= 0:
         return
     source = os.path.abspath(str(source_dir))
     try:
@@ -594,6 +630,24 @@ def delete_short_media(source_dir, settings: OrganizerSettings, report: Organize
         except OSError:
             continue
         if _is_protected(entry.path, settings):
+            continue
+        try:
+            size = entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            continue
+        # 大小判断最便宜, 先做: 录坏/中断留下的碎文件通常远小于阈值
+        if settings.min_size_bytes > 0 and size < settings.min_size_bytes:
+            try:
+                os.remove(entry.path)
+                report.deleted_short += 1
+                logger.info(
+                    f'文件整理: 删除过小文件 {entry.name} '
+                    f'({size / BYTES_PER_MB:.2f} MB)'
+                )
+            except OSError as err:
+                logger.warning(f'文件整理: 删除 {entry.path} 失败: {err}')
+            continue
+        if settings.min_duration_seconds <= 0:
             continue
         duration = probe_duration_seconds(entry.path)
         if duration is None:
@@ -636,7 +690,7 @@ def archive_media(source_dir, settings: OrganizerSettings, report: OrganizeRepor
 
 
 def run_once(settings: OrganizerSettings | None = None) -> OrganizeReport:
-    """执行一轮整理: 扁平化 -> 删空目录 -> 删短视频 -> 归档。"""
+    """执行一轮整理: 扁平化 -> 删空目录 -> 删过小/过短视频 -> 归档。"""
     settings = settings or get_settings()
     report = OrganizeReport()
     if not settings.enabled:

@@ -41,6 +41,7 @@ class OrganizerTestBase(unittest.TestCase):
             source_dir=self.root,
             target_dir='',
             min_duration_seconds=0.0,
+            min_size_bytes=0,
             grace_seconds=0,
         )
         values.update(kwargs)
@@ -59,6 +60,14 @@ class ParseSettingsTest(OrganizerTestBase):
         self.assertEqual(fo.parse_min_duration_seconds('-5'), 0.0)
         self.assertEqual(fo.parse_min_duration_seconds('x'), fo.DEFAULT_MIN_DURATION_SECONDS)
         self.assertEqual(fo.parse_min_duration_seconds('99999999'), fo.MAX_MIN_DURATION_SECONDS)
+
+    def test_min_size_mb(self):
+        self.assertEqual(fo.parse_min_size_mb('2'), 2 * fo.BYTES_PER_MB)
+        self.assertEqual(fo.parse_min_size_mb('0.5'), fo.BYTES_PER_MB // 2)
+        self.assertEqual(fo.parse_min_size_mb('0'), 0)
+        self.assertEqual(fo.parse_min_size_mb('-1'), 0)
+        self.assertEqual(fo.parse_min_size_mb('abc'), int(fo.DEFAULT_MIN_SIZE_MB * fo.BYTES_PER_MB))
+        self.assertEqual(fo.parse_min_size_mb('999999'), fo.MAX_MIN_SIZE_MB * fo.BYTES_PER_MB)
 
     def test_grace_seconds(self):
         self.assertEqual(fo.parse_grace_seconds('0'), 0)
@@ -258,6 +267,41 @@ class DeleteShortTest(OrganizerTestBase):
         self.assertEqual(report.deleted_short, 0)
         self.assertTrue(os.path.isfile(os.path.join(self.root, 'sub', 'short.mkv')))
 
+    def test_deletes_file_smaller_than_size_threshold(self):
+        small = os.path.join(self.root, 'small.mkv')
+        make_media(small, b'x' * 1024)  # 1 KB
+        big = os.path.join(self.root, 'big.mkv')
+        make_media(big, b'x' * (3 * fo.BYTES_PER_MB))  # 3 MB
+        report = fo.OrganizeReport()
+        fo.delete_short_media(
+            self.root,
+            self.settings(min_size_bytes=2 * fo.BYTES_PER_MB),
+            report,
+        )
+        self.assertEqual(report.deleted_short, 1)
+        self.assertFalse(os.path.exists(small))
+        self.assertTrue(os.path.exists(big))
+
+    def test_size_boundary_is_kept(self):
+        exact = os.path.join(self.root, 'exact.mkv')
+        make_media(exact, b'x' * (2 * fo.BYTES_PER_MB))
+        report = fo.OrganizeReport()
+        fo.delete_short_media(self.root, self.settings(min_size_bytes=2 * fo.BYTES_PER_MB), report)
+        self.assertEqual(report.deleted_short, 0)
+        self.assertTrue(os.path.exists(exact))
+
+    def test_size_rule_deletes_without_probing_duration(self):
+        make_media(os.path.join(self.root, 'small.mkv'), b'x' * 1024)
+        report = fo.OrganizeReport()
+        with mock.patch.object(fo, 'probe_duration_seconds') as probe:
+            fo.delete_short_media(
+                self.root,
+                self.settings(min_duration_seconds=60, min_size_bytes=2 * fo.BYTES_PER_MB),
+                report,
+            )
+        probe.assert_not_called()
+        self.assertEqual(report.deleted_short, 1)
+
 
 class ArchiveTest(OrganizerTestBase):
     def test_archives_top_level_media_only(self):
@@ -291,6 +335,20 @@ class ArchiveTest(OrganizerTestBase):
         fo.archive_media(self.root, self.settings(target_dir=self.root), report)
         self.assertEqual(report.archived, 0)
         self.assertTrue(os.path.exists(os.path.join(self.root, 'a.mkv')))
+
+    def test_target_equal_source_still_flattens_and_cleans(self):
+        """归档目标等于源目录时, 扁平化/空目录清理不能被误排除。"""
+        make_media(os.path.join(self.root, 'sub', 'deep', 'a.mkv'))
+        report = fo.OrganizeReport()
+        touched = set()
+        settings = self.settings(target_dir=self.root)
+        fo.flatten_media(self.root, settings, report, touched)
+        fo.remove_empty_dirs(self.root, settings, report, touched)
+        fo.archive_media(self.root, settings, report)
+        self.assertEqual(report.moved_to_root, 1)
+        self.assertEqual(report.removed_dirs, 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, 'a.mkv')))
+        self.assertFalse(os.path.exists(os.path.join(self.root, 'sub')))
 
 
 class RunOnceTest(OrganizerTestBase):
@@ -449,6 +507,14 @@ class UpdateSettingsTest(OrganizerTestBase):
         fo.update_settings(self.settings(enabled=False, interval_seconds=1))
         self.assertEqual(fo.get_settings().interval_seconds, fo.MIN_INTERVAL_MINUTES * 60)
 
+    def test_thread_start_failure_is_logged_not_raised(self):
+        with mock.patch.object(
+            fo, 'start_organizer_thread',
+            side_effect=RuntimeError("can't start new thread"),
+        ), mock.patch.object(fo.logger, 'error') as error:
+            fo.update_settings(self.settings(enabled=True))
+        error.assert_called_once()
+
     def test_start_thread_is_idempotent(self):
         fo.update_settings(self.settings(enabled=False))
         fo.start_organizer_thread()
@@ -469,6 +535,7 @@ class WiringTest(unittest.TestCase):
             '整理源目录(留空则用直播保存路径)',
             '归档目标目录(留空则不归档)',
             '删除小于该时长的视频(秒)',
+            '删除小于该大小的视频(MB)',
             '写入宽限期(秒)',
         ):
             self.assertIn(key, self.source)
